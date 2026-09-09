@@ -1,0 +1,114 @@
+# =============================================================================
+#  .dockerignore — what never reaches the build context
+# =============================================================================
+#
+#  Two jobs. The first is speed: everything listed here is excluded before the
+#  daemon receives the context, so a build does not begin by uploading a
+#  200MB node_modules it is about to throw away.
+#
+#  The second is safety, and it is the reason this file is not optional.
+#  `COPY src ./src` copies what the DAEMON has, not what you think you asked
+#  for — so anything sitting in this directory is a candidate for the image
+#  unless it is named here.
+# =============================================================================
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+# This is the line that separates a shareable image from a credential leak.
+#
+# .env holds MONGO_URI (with its password), JWT_SECRET, ADMIN_PASSWORD and
+# SHOPIFY_PARTNER_API_TOKEN — read access to your entire Partner organisation.
+# Nothing in the Dockerfile COPYs it by name, but that is not protection: a
+# broad `COPY . .` in some future edit would sweep it in, and once a file is in
+# a layer it is in that layer FOREVER. Deleting it in a later RUN does not
+# remove it — the layer still ships, and `docker history`, a `docker save`
+# tarball, or anyone who pulls the image can read it straight out.
+#
+# Pushing such an image to a registry is disclosing those credentials to
+# everyone who can pull it, and there is no way to un-ring that bell short of
+# rotating every secret in the file.
+#
+# Configuration reaches the container at RUN time instead: --env-file .env,
+# compose's `environment:`, or your orchestrator's secret store. dotenv never
+# overwrites an already-set variable, so that always wins.
+#
+# .env.example is excluded by the same pattern, deliberately. It is a template
+# for a human reading the repository, the image has no use for it, and "no
+# .env-shaped file ever enters the build context" is a rule worth keeping
+# without exceptions.
+.env
+.env.*
+*.pem
+*.key
+
+# ── Dependencies ────────────────────────────────────────────────────────────
+# Rebuilt inside the image by `npm ci`. Copying the host's tree in would be
+# actively harmful, not merely wasteful: it is installed for the host platform
+# (macOS/arm64 on this machine) and the image is Alpine/musl. Any package with a
+# native binding would fail to load at runtime with an error that names the
+# architecture, not the cause.
+node_modules
+
+# ── Build output ────────────────────────────────────────────────────────────
+# The image compiles its own dist/ in the build stage. A stale host dist/ copied
+# in could leave orphaned .js files from sources that have since been deleted or
+# renamed — and Node resolves whatever is on disk, so the image would run code
+# that no longer exists in src/. Same hazard the .gitignore comment describes.
+dist
+*.tsbuildinfo
+
+# ── Version control ─────────────────────────────────────────────────────────
+# Large, and it carries full history — including any secret that was ever
+# committed and later removed, which is still readable in the object store.
+.git
+.gitignore
+.gitattributes
+
+# ── Tests ───────────────────────────────────────────────────────────────────
+# tsconfig already excludes test/ from compilation, so this changes nothing
+# about the output — it only keeps the context small and the runtime image
+# honest about what it contains. Run the suite in CI, before the build.
+test
+coverage
+
+# ── Documentation ───────────────────────────────────────────────────────────
+# Read on GitHub, never by the process.
+docs
+*.md
+
+# ── Tooling and editor / OS noise ───────────────────────────────────────────
+# Linting is a CI concern; the compiler in stage 2 does not consult it.
+eslint.config.js
+.editorconfig
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# ── Logs and local runtime state ────────────────────────────────────────────
+*.log
+logs
+npm-debug.log*
+
+# ── Docker's own files ──────────────────────────────────────────────────────
+# Nothing inside the image reads these. Excluding them also means editing a
+# comment in the Dockerfile does not invalidate a COPY layer.
+Dockerfile
+Dockerfile.*
+.dockerignore
+docker-compose*.yml
+
+# ── Credential files on disk ────────────────────────────────────────────────
+# The header above explains why this file is not optional. These are the
+# on-disk counterpart of .env: `.env.example` invites the operator to point
+# GOOGLE_APPLICATION_CREDENTIALS at a service-account key, and a key swept into
+# a layer is in that layer forever — `docker history` and `docker save` both
+# read it back out.
+secret/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*-key.json
+*service-account*.json
+*credentials*.json

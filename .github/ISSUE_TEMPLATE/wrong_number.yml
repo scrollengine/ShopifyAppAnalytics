@@ -1,0 +1,85 @@
+name: Wrong number
+description: A figure was confidently wrong — here or on any other Shopify-app dashboard.
+labels: ['wrong-number']
+body:
+    - type: markdown
+      attributes:
+          value: |
+              This is the report this project is made of.
+
+              Analytics code does not crash when it is wrong. It returns a
+              plausible number, nobody gets paged, and the number ends up in a
+              board deck. Nearly every guard in this codebase exists because one
+              specific figure was wrong once — a 47.6% churn reading for a month
+              in which nobody cancelled, an MRR line of $45M against $10K of
+              settled payouts.
+
+              **You do not have to be running this project to file one.** If a
+              number on your own dashboard, built however you built it, was
+              confidently wrong, that experience is directly useful here.
+
+    - type: textarea
+      id: claim
+      attributes:
+          label: What the number claimed, and what was actually true
+          placeholder: |
+              The dashboard said churn was 47.6% for April. Nobody cancelled in
+              April; the real figure was 0%.
+      validations:
+          required: true
+
+    - type: textarea
+      id: how-found
+      attributes:
+          label: How you found out it was wrong
+          description: What made you doubt it, and what you checked it against.
+      validations:
+          required: true
+
+    - type: textarea
+      id: cause
+      attributes:
+          label: What produced the error, if you know
+          description: >
+              A definition, a join, a date boundary, a settlement delay, a
+              population mismatch — whatever the underlying cause turned out to
+              be. "Don't know" is a perfectly acceptable answer; the wrong number
+              is still worth reporting without it.
+      validations:
+          required: false
+
+    - type: dropdown
+      id: plausibility
+      attributes:
+          label: Did it read as obviously wrong, or plausible?
+          description: >
+              This matters more than it looks. A figure that is obviously wrong
+              gets caught. A plausible one gets published.
+          options:
+              - 'Plausible — it was believed for a while'
+              - 'Obviously wrong at a glance'
+              - 'Somewhere in between'
+      validations:
+          required: true
+
+    - type: dropdown
+      id: source
+      attributes:
+          label: Where did you see it?
+          options:
+              - 'This project'
+              - "Another dashboard I built or use"
+              - "Shopify's Partner dashboard"
+      validations:
+          required: true
+
+    - type: textarea
+      id: context
+      attributes:
+          label: Anything else
+          description: >
+              If it was this project: which page, which endpoint, what
+              `/api/meta/coverage` returned, and whether a sync had completed.
+              **Strip any tokens or keys before pasting.**
+      validations:
+          required: false

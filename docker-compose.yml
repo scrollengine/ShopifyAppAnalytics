@@ -1,0 +1,172 @@
+# =============================================================================
+#  shopify-app-analytics — the whole stack.
+# =============================================================================
+#
+#      cp .env.example .env     # then fill in the REQUIRED block
+#      docker compose up --build
+#
+#  Then open http://localhost:3000 and sign in with ADMIN_EMAIL / ADMIN_PASSWORD.
+#
+#  The first boot pulls your full Partner API history, which takes a while. The
+#  dashboard is usable immediately and shows sync progress on its Sync screen —
+#  the backend answers /healthz with 503 until that first sync completes, which
+#  is a READINESS signal about data, not a fault.
+#
+#  Three services: mongo (state) -> backend (API + sync) -> frontend (dashboard).
+#  Only the dashboard is published to your host; see the `ports` notes below.
+# =============================================================================
+
+services:
+
+    # =========================================================================
+    #  MongoDB — the only datastore. All history lives here.
+    # =========================================================================
+    mongo:
+        # Pinned to a MAJOR.MINOR. Mongo's storage format is tied to the release
+        # series, so an unpinned tag can silently roll you onto a version that
+        # will not open the existing data files after a `docker compose pull`.
+        image: mongo:7.0
+
+        restart: unless-stopped
+
+        #  NO PORTS BLOCK. Publishing 27017 would expose an unauthenticated
+        # database to every host on your network — this image has no credentials
+        # configured, and it does not need any, because only the backend reaches
+        # it and it does so over the private compose network.
+        #
+        # To inspect it:  docker compose exec mongo mongosh shopify_app_analytics
+
+        volumes:
+            # Named volume, so `docker compose down` keeps your synced history
+            # and only `docker compose down -v` destroys it. Without this every
+            # restart would re-pull months of Partner API data.
+            - mongo_data:/data/db
+
+        healthcheck:
+            # This is what makes `depends_on: service_healthy` meaningful below.
+            # A Mongo container accepts TCP connections a moment before it can
+            # answer queries, so the backend must wait for a real command to
+            # succeed — not merely for the port to open.
+            test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            interval: 10s
+            timeout: 5s
+            # Generous: the very first start initialises the data directory,
+            # which is much slower than every subsequent boot.
+            retries: 12
+            start_period: 20s
+
+    # =========================================================================
+    #  Backend — the REST API and the Partner API sync job runner.
+    # =========================================================================
+    backend:
+        build:
+            context: ./backend
+        restart: unless-stopped
+
+        depends_on:
+            mongo:
+                # Not `service_started`: mongoose fails its initial connect if
+                # Mongo is still initialising, and on a first run that is the
+                # normal case rather than an edge case.
+                condition: service_healthy
+
+        # Everything comes from the root .env — no secrets in this file, so it
+        # stays safe to commit. The API token, admin password and JWT secret all
+        # arrive this way.
+        env_file: .env
+
+        environment:
+            # Overrides whatever MONGO_URI is in .env. Inside the compose network
+            # the database is reachable at the SERVICE NAME `mongo`, never at
+            # localhost — localhost in this container is the backend itself.
+            # Setting it here means a .env copied from a local (non-Docker) setup
+            # cannot break the stack.
+            MONGO_URI: mongodb://mongo:27017/shopify_app_analytics
+
+        #  NO PORTS BLOCK — deliberate, and worth understanding.
+        #
+        # The dashboard reaches the API over the compose network, and the browser
+        # only ever talks to the frontend (next.config.js proxies /api and
+        # /healthz). So publishing 8080 would add no capability and would expose
+        # an authenticated API to your whole LAN.
+        #
+        # If you want to curl it directly while debugging, either
+        #     docker compose exec backend wget -qO- http://127.0.0.1:8080/healthz
+        # or uncomment this, binding to loopback ONLY so it is not LAN-visible:
+        #     ports:
+        #         - "127.0.0.1:8080:8080"
+
+        # Docker's init (tini) becomes PID 1 and forwards SIGTERM to node. PID 1
+        # ignores signals it has no handler for, so without this the backend's
+        # graceful shutdown — stop the job runner, close Mongo — never runs, and
+        # every stop is a 10s wait followed by SIGKILL.
+        init: true
+
+        healthcheck:
+            # LIVENESS, not readiness. Any HTTP response proves the process is up
+            # and serving; the status code is deliberately ignored because
+            # /healthz answers 503 until the first sync finishes, and a stack that
+            # marked the backend unhealthy for the length of that sync would be
+            # actively misleading.
+            #
+            # Uses node rather than curl/wget: node is the one binary the backend
+            # image is guaranteed to contain.
+            test:
+                - "CMD"
+                - "node"
+                - "-e"
+                - "require('http').get('http://127.0.0.1:8080/healthz',()=>process.exit(0)).on('error',()=>process.exit(1))"
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 20s
+
+    # =========================================================================
+    #  Frontend — the Next.js dashboard. The only thing you open in a browser.
+    # =========================================================================
+    frontend:
+        build:
+            context: ./frontend
+        restart: unless-stopped
+
+        depends_on:
+            backend:
+                # `service_started`, NOT `service_healthy`, on purpose. The
+                # backend is only "healthy" once it answers /healthz, and it
+                # answers 503 until the first Partner sync completes — which is
+                # exactly when you most want the dashboard up, because its Sync
+                # screen is how you watch that sync progress.
+                condition: service_started
+
+        environment:
+            #  THE SERVICE NAME, NOT localhost. This is the single most common
+            # mistake with this setup: inside the frontend container `localhost`
+            # is the FRONTEND, so http://localhost:8080 connects to nothing and
+            # every API call fails with an error that does not name the cause.
+            # Compose resolves `backend` on its private network to the backend
+            # container, wherever it happens to be running.
+            #
+            # ${PORT:-8080} is read from your .env so this cannot drift out of
+            # step with the port the backend was told to listen on.
+            #
+            # Set here rather than left to env_file so that a .env carried over
+            # from a local dev setup — where localhost:8080 was correct — cannot
+            # silently break the containerised stack.
+            NEXT_PUBLIC_API_BASE_URL: http://backend:${PORT:-8080}
+
+        ports:
+            # The one published port: the dashboard itself.
+            #
+            # Left on 0.0.0.0 so you can reach it from another machine on your
+            # network. If this host is not one you trust, bind it to loopback
+            # instead — "127.0.0.1:3000:3000" — and reach it over an SSH tunnel.
+            - "3000:3000"
+
+        # Same PID 1 reasoning as the backend. The frontend's entrypoint `exec`s
+        # node so the signal has something to reach.
+        init: true
+
+volumes:
+    # Declared here so Docker manages its lifecycle; it survives `down` and is
+    # removed only by `down -v`.
+    mongo_data:

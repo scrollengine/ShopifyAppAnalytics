@@ -1,0 +1,32 @@
+{
+    "name": "shopify-app-analytics-frontend",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Dashboard for shopify-app-analytics \u2014 the Performance suite: MRR, cohorts, trials and churn.",
+    "license": "SEE LICENSE IN ../LICENSE",
+    "engines": {
+        "node": ">=18.17"
+    },
+    "scripts": {
+        "dev": "next dev",
+        "build": "next build",
+        "start": "next start",
+        "lint": "next lint"
+    },
+    "dependencies": {
+        "@shopify/polaris": "^12.27.0",
+        "@shopify/polaris-icons": "^8.11.1",
+        "axios": "^1.7.9",
+        "next": "15.5.25",
+        "react": "18.2.0",
+        "react-dom": "18.2.0",
+        "recharts": "^3.3.0"
+    },
+    "devDependencies": {
+        "eslint": "^8.57.1",
+        "eslint-config-next": "15.5.25"
+    },
+    "overrides": {
+        "postcss": "^8.5.23"
+    }
+}

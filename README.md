@@ -33,17 +33,37 @@ number ends up in a board deck.
 
 ## What's in this release
 
-The **Performance** suite — nine views covering acquisition through revenue and churn.
+Ten screens: an **Overview** home, the **Performance** suite — seven views covering acquisition
+through revenue and churn — and two **Setup** screens that configure and feed the dataset those seven
+read. Every one of them has a working backend.
 
-### Conversion Funnel
+Revenue is one screen with three tabs — **Revenue · By country · Churn** — under a single date range,
+so the three views of the money describe the same window rather than three windows nobody set
+together. Where a tab's endpoint cannot honour that range, the tab says so on itself; see
+[Revenue](#revenue).
 
-The whole path in one picture: listing page views → engaged views → install clicks → installs →
-trials started → converted to paid → churned, each step showing its conversion rate off the one
-before it.
+### Overview
 
-It also carries **install cohorts** and **retention curves**, so you can ask "of the merchants who
-installed in a given month, what share were still here N months later" instead of only ever looking
-at today's snapshot.
+Where you land after signing in. Installs, uninstalls, reinstalls and gross revenue for the selected
+app over the last 30 days, the same four all-time, and the install trend behind them — with the
+server's own caveats printed under the figures they qualify, including the one saying that
+"estimated active" is a fold over the event stream rather than a number Shopify publishes. Before
+the first sync it says so and draws nothing, which is the point: an empty tile and an app with no
+installs look identical.
+
+### Funnel
+
+The whole path in one picture. Seven fixed stages: listing page views → add-app clicks → consent
+completed → installs as GA4 saw them → installs as the Partner API saw them → trials started →
+trials converted, each step showing its conversion rate off the one before it. The two install rows
+sit side by side on purpose — the gap between the two sources is the measurement, not an error to
+hide. Under the fixed funnel sits a second, **operator-built** one — pick your own steps from a
+catalogue of 28 events (engaged views, charge states, churn during or after trial, uninstalls) and
+the same query answers both, so the two charts on the page cannot disagree.
+
+It also carries **install cohorts**, **retention curves**, **plan mix** and a **time-to-paid**
+histogram, so you can ask "of the merchants who installed in a given month, what share were still
+here N months later" instead of only ever looking at today's snapshot.
 
 One thing the page is explicit about: the early steps come from Shopify's listing analytics and count
 **visitors**, while the later steps come from the Partner API and count **shops**. Any percentage
@@ -55,8 +75,11 @@ presenting the ratio as fact.
 Where your listing traffic and installs actually come from — the split between organic discovery and
 paid placement, plus the geography of who is finding you.
 
-This answers the question ad reporting can't on its own: not "how many clicks did we buy", but which
-sources produce merchants who install and stay.
+Each source/medium pair carries users, views, install clicks, installs and the install rate between
+them — so you can see which sources convert attention into installs rather than only which bought the
+most clicks. Note the limit: this page stops at the install. Nothing here follows a source's
+merchants forward into trials, conversion or churn, so it cannot tell you which sources produce
+merchants who *stay*.
 
 ### Trial Funnel
 
@@ -77,7 +100,11 @@ events. A dashboard that shows only one of the two hides which is actually happe
 ### Stores
 
 Every merchant who has ever touched your app, with their lifecycle and whether the app is installed
-right now — filterable by plan, state, country and install status.
+right now — filterable by install state, subscription status, billing cadence, store record and store
+status. There is no country filter: the only per-store country this build holds is GA4's install
+traffic, so a filter built on it would look like it worked and quietly match nothing. A Shopify-plan
+group is published too, but nothing in this build can populate it — every store sits in its single
+"Not pushed" bucket until an operator pushes store profiles of their own.
 
 Install state is reconstructed from the relationship events Shopify emits (install, reinstall,
 uninstall, deactivate), so it survives a merchant leaving. A store that installed, paid and left is
@@ -94,8 +121,14 @@ says which it is, so the two don't get confused.
 
 ### Revenue
 
+One screen, three tabs, one date range: **Revenue**, **By country**, and **Churn**. The tab is in the
+URL (`/revenue?view=countries`), so a view can be bookmarked and shared, and each tab is fetched only
+when it is opened.
+
+#### Revenue
+
 The headline view: **MRR, active subscribers, ARPU and cash collected — measured at any date you
-pick, not just today.** Choose a past month and every figure on the page reports what was true then.
+pick, not just today.** Choose a past month and every figure on the tab reports what was true then.
 
 - **MRR movement** for the period — new business, expansion, contraction and churn, reconciling from
   the opening balance to the closing one.
@@ -103,29 +136,68 @@ pick, not just today.** Choose a past month and every figure on the page reports
   then, their plan today, whether they're still installed, and whether they upgraded, downgraded or
   left.
 - **Revenue by plan**, so you can see which tier the money actually comes from.
-- **A reconciliation panel** showing the same figure computed three independent ways — contracted
-  run-rate, live subscription state, and settled payouts. The gaps between them are diagnostic, so
-  they're published rather than hidden.
+- **A reconciliation card** that prints MRR under each label it was measured at — as of the date you
+  picked, and as of today. This build has exactly **one** MRR engine, the settled payout ledger, so
+  those rows agree by construction rather than being an independent cross-check; the card says so in
+  its own notes instead of presenting one measurement as several agreeing ones.
 
 Cash and run-rate are kept strictly apart throughout. Cash is lumpy — annual prepayments, refunds,
 payout timing. MRR is smooth. Merging them makes both wrong.
 
-### Revenue Country
+#### By country
 
 Where the money comes from geographically — revenue and merchant counts by country.
 
 Country data arrives in inconsistent forms, so names are normalised before grouping; otherwise one
 country lands in two buckets and both are wrong. Anything that can't be attributed is **published as
 an explicit remainder** rather than quietly dropped, so the breakdown always reconciles with the
-total on the Revenue page.
+total on the Revenue tab.
 
-### Revenue Churn
+**This tab is lifetime and says so.** Its endpoint takes no date window at all, so the range at the
+top of the screen does not change a single figure on it — and rather than sit silently under a
+control that appears to govern it, the tab prints that fact above its own numbers. A tab that
+quietly ignores the filter above it is how an all-time figure gets read as a 30-day one.
+
+#### Churn
 
 Revenue lost per month, gross and net, with the merchants behind each figure.
 
 Net churn is not clamped at zero — when expansion outruns losses it goes negative, and negative net
 churn is the single best signal a subscription business has. Rounding it up to zero would hide your
 best months.
+
+**This tab buckets by whole calendar month, and reconciles the range out loud.** Its endpoint asks
+for a *number of months* counted back from today, not a start and an end — so the selected range is
+converted, and the tab prints what that conversion produced: how many months, which ones, and that
+the newest is still in progress. Pick a custom range that *ended in the past* and it says plainly
+that it cannot honour it and that the Revenue tab beside it is therefore showing a different span of
+time. The waterfall and the last-month figures always describe the last **complete** month, never the
+one under way.
+
+---
+
+## Setup
+
+Two screens, visited on day one and rarely after. They are not analytics — they are what makes the
+views above have anything to read.
+
+### Partner Apps
+
+Register the app you are reporting on, and see its headline numbers: installs and uninstalls over a
+window, how many stores still have it, and what it has earned. Everything else in the dashboard is
+scoped by the app picked here.
+
+### Sync
+
+Where the data comes from, and whether it actually arrived. Each source gets a card showing when it
+last ran and when it runs next; the four that have a handler on this server (partner sync, listing
+rollups, install attribution, and a no-op that proves the runner works) also carry a button to run
+one now. Plus the job history, and the **coverage gates** that say how far your stored history
+reaches.
+
+Read those gates before you quote anything. A month that was never pulled and a month in which
+nothing happened produce the same empty result, and these measurements are the only thing that tells
+them apart.
 
 ---
 
@@ -167,32 +239,60 @@ Coming in a later drop, once this one has settled:
 
 - Competitor tracking — listing snapshots, review mining, positioning over time
 - Keyword rankings and App Store position monitoring
-- Search-term attribution
 - Shopify Ads spend and performance
 - LLM-generated insights
+
+Three of those four — competitor tracking, keyword rankings and the LLM briefing — still get a card
+on the Sync page, so the gap is visible rather than merely absent. Each says on itself that it ships
+no handler in this build; only the keyword-ranking card keeps a button, and pressing it is **refused
+by name** rather than quietly starting a different job. Ad spend is the one with no card at all —
+there is no job type for it here.
 
 ---
 
 ## What you'll need
 
-- A Shopify Partner account with API access — the only hard requirement
+- A Shopify Partner account with API access — the only hard requirement for **your own** numbers
 - Somewhere to run it, and a database to keep history in
-- *Optional:* access to Shopify's listing analytics export, which powers the Conversion Funnel's
+- *Optional:* access to Shopify's listing analytics export, which powers the Funnel page's
   upper steps and all of Traffic Sources
 
 Without the optional piece everything from installs onward still works; the listing-analytics views
 report that they have no data rather than showing zeros.
 
+**[`SETUP.md`](./SETUP.md) is the step-by-step guide** — Docker, the Partner credentials, and the
+full walkthrough for getting a Google BigQuery service-account key and wiring it into a container.
+
+**To look around first, you need none of it.** `npm run seed:demo` writes a self-consistent fictional
+dataset and every screen fills in. It refuses to run against a database holding a real Partner sync —
+it counts what is already there and stops if it finds anything it did not write — and
+`npm run seed:demo:down` removes exactly what it wrote. It also sets the sync watermarks and
+**recomputes the coverage gates from the rows it just wrote**, through the same two files a real sync
+uses, so the demo is honest about itself in the same way the real thing is.
+
 ---
 
 ## Roadmap
 
+- [x] Ship the dashboard interface alongside the data layer — every screen is built and served
+- [ ] One-command quickstart — `docker compose up -d --build` builds and starts the whole stack, but
+      six values still have to be put in `.env` first ([`DEPLOYMENT.md`](./DEPLOYMENT.md))
 - [ ] Extract into a standalone, installable release
 - [ ] Publish inbound contribution terms (DCO or CLA) and open pull requests
-- [ ] Ship the dashboard interface alongside the data layer
-- [ ] One-command quickstart
-- [ ] A demo dataset, so the dashboard is explorable without a Partner account
+- [x] A demo dataset, so the dashboard is explorable without a Partner account — `npm run seed:demo`
 - [ ] The Market Intel suite listed above
+
+---
+
+## How it works
+
+- [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) — the architecture: the security seam, the job runner,
+  the revenue engine, the single derivations, and the render-boundary contract that keeps an unknown
+  from rendering as a zero.
+- [`DEPLOYMENT.md`](./DEPLOYMENT.md) — running it on your own hardware, from an empty directory to a
+  dashboard showing your real MRR.
+- [`backend/docs/FIDELITY.md`](./backend/docs/FIDELITY.md) — **what each published figure is and what
+  would make it wrong.** Read this before putting any of these numbers in a deck.
 
 ---
 

@@ -1,0 +1,60 @@
+# =============================================================================
+#  Build context exclusions.
+# =============================================================================
+#  Everything here is either rebuilt inside the image, host-specific, or a
+#  secret. Excluding it keeps the context small (faster builds) and — for the
+#  .env rules — makes it *impossible* to accidentally COPY credentials into a
+#  layer, which is the one Docker mistake you cannot undo after `docker push`.
+# =============================================================================
+
+# Reinstalled in the image. Host node_modules may hold darwin/arm64 binaries
+# that cannot execute on the linux image — copying them in is a silent breakage.
+node_modules
+
+# A previous host build. Stale output would be shadowed by the in-image build
+# anyway, but copying it wastes context and can confuse layer caching.
+.next
+out
+build
+
+#  NEVER let these into an image. `.env` holds the admin password, the JWT
+# secret and the Partner API token.
+.env
+.env.*
+
+# ── Credential files on disk ────────────────────────────────────────────────
+# The same block backend/.dockerignore carries, and it is here for a reason that
+# is easy to miss: .gitignore already excludes these, but .gitignore does NOT
+# govern a Docker build context. `COPY . .` in the Dockerfile below reads the
+# working directory, not the index, so a key file sitting untracked beside
+# package.json would be swept into a layer — and `docker history` and
+# `docker save` both read a layer back out.
+#
+# Nothing in the dashboard reads a key today. The rule is here so that adding
+# one later is not silently also a disclosure.
+secret/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*-key.json
+*service-account*.json
+*credentials*.json
+
+# VCS history and local tooling noise.
+.git
+.gitignore
+.vercel
+.idea
+.vscode
+.DS_Store
+
+# Docs are not needed at build or run time.
+*.md
+
+# Logs and coverage.
+coverage
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

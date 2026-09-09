@@ -1,0 +1,65 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# testing
+/coverage
+
+# local env files — the dashboard needs none of these to be secret, but keep
+# the habit: .env.example is the file that belongs in version control.
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vscode
+.idea
+
+# vercel
+.vercel
+
+# ── Credential files ────────────────────────────────────────────────────────
+# Not hypothetical: `.env.example` invites an operator to point
+# GOOGLE_APPLICATION_CREDENTIALS at a service-account key on disk, and the
+# obvious place to put it is right here. Without these lines a file named
+# `gcp-key.json` in this directory is TRACKED, and a key that reaches a public
+# repository is compromised the moment it is pushed — rotating it is the only
+# remedy, and history rewriting does not help once it has been fetched.
+*.pem
+*.key
+*.p12
+*.pfx
+*-key.json
+*service-account*.json
+*credentials*.json
+secret/
+secrets/
+
+# SSH / GPG private keys. `*.key` and `*.pem` above miss the conventional
+# OpenSSH filenames, which carry no extension at all.
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.ppk
+*.jks
+*.keystore
+.npmrc
+.netrc
+.pgpass

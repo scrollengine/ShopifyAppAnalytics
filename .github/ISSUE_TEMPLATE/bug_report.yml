@@ -1,0 +1,133 @@
+name: Bug report
+description: Something is broken, errors, or does not do what it says.
+labels: ['bug']
+body:
+    - type: markdown
+      attributes:
+          value: |
+              Thanks for taking the time. A note on the fields below: they are not
+              bureaucracy, they are the four facts that diagnose most problems in
+              this system — **which page**, **which endpoint**, **what
+              `/api/meta/coverage` says**, and **whether a sync has finished**.
+
+              If the problem is that a **number looks wrong** rather than that
+              something is broken, use the "Wrong number" template instead —
+              that one is worth more to this project than a crash report.
+
+              **Do not report a security vulnerability here.** See
+              [`SECURITY.md`](https://github.com/scrollengine/ShopifyAppAnalytics/blob/main/SECURITY.md) — it goes by email.
+
+    - type: textarea
+      id: what-happened
+      attributes:
+          label: What happened
+          description: What you did, what you expected, and what you got instead.
+          placeholder: |
+              I opened Revenue and picked March 2026. The MRR card showed "—" but
+              the Subscriptions page lists 40 paying merchants for that month.
+      validations:
+          required: true
+
+    - type: dropdown
+      id: page
+      attributes:
+          label: Which page
+          description: The dashboard screen where you saw it. Pick "Not a page" for a backend-only or setup problem.
+          options:
+              - Conversion Funnel
+              - Traffic Sources
+              - Trial Funnel
+              - Logo Churn
+              - Stores
+              - Subscriptions
+              - Revenue
+              - Revenue Country
+              - Revenue Churn
+              - Partner Apps
+              - Sync
+              - Login
+              - Not a page (backend, Docker, setup)
+      validations:
+          required: true
+
+    - type: input
+      id: endpoint
+      attributes:
+          label: Which endpoint
+          description: >
+              Open your browser's network tab, reload the page, and give the request
+              that misbehaved — path and query string. This is usually the single
+              most useful line in the report. Redact nothing except credentials.
+          placeholder: GET /api/revenue/overview?partner_app_id=...&start=2026-03-01&end=2026-03-31
+      validations:
+          required: false
+
+    - type: textarea
+      id: coverage
+      attributes:
+          label: What `/api/meta/coverage` says
+          description: >
+              The honesty envelope behind every figure on every page — how far back
+              the data actually reaches and what is missing from it. A large share
+              of "wrong number" reports turn out to be a coverage gap this endpoint
+              already describes, so please paste the whole response.
+
+
+              `curl -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/meta/coverage?partner_app_id=YOUR_APP_ID"`
+          render: json
+      validations:
+          required: false
+
+    - type: dropdown
+      id: sync-state
+      attributes:
+          label: Has a sync completed?
+          description: >
+              Check the Sync page, or `GET /api/sync/jobs`. Almost every figure is
+              computed from synced history, so a never-synced or partly-synced
+              install produces refusals and gaps that are correct behaviour rather
+              than bugs.
+          options:
+              - 'Yes — a Partner sync finished successfully'
+              - 'Yes — a Partner sync AND a BigQuery/listing-analytics sync finished'
+              - 'No — never synced, or the first sync is still running'
+              - 'A sync ran and FAILED'
+              - "Don't know"
+      validations:
+          required: true
+
+    - type: textarea
+      id: logs
+      attributes:
+          label: Backend logs around the failure
+          description: >
+              The lines from the backend at the moment it went wrong.
+              **Check them for secrets before pasting** — a Partner API token,
+              `JWT_SECRET`, or a service-account key must not go into a public issue.
+          render: text
+      validations:
+          required: false
+
+    - type: textarea
+      id: environment
+      attributes:
+          label: Environment
+          description: How you are running it.
+          value: |
+              - Commit / version:
+              - Node version (`node -v`):
+              - Running via: Docker compose / npm start / other
+              - MongoDB: version, and local or hosted
+              - BigQuery listing-analytics tier configured: yes / no
+      validations:
+          required: true
+
+    - type: checkboxes
+      id: checks
+      attributes:
+          label: Before submitting
+          options:
+              - label: I have checked this is not a security vulnerability (those go by email — see `SECURITY.md`).
+                required: true
+              - label: I have removed any tokens, passwords and keys from everything I pasted above.
+                required: true

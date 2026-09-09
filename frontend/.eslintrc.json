@@ -1,0 +1,7 @@
+{
+    "extends": "next/core-web-vitals",
+    "rules": {
+        "indent": ["warn", 4, { "SwitchCase": 1 }],
+        "quotes": ["warn", "single", { "avoidEscape": true, "allowTemplateLiterals": true }]
+    }
+}

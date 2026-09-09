@@ -1,0 +1,241 @@
+# =============================================================================
+#  CI — the three things that can be checked mechanically
+# =============================================================================
+#
+#  This project's whole claim is that its numbers are not confidently wrong, so
+#  the tests are the product as much as the endpoints are. CI exists to make
+#  that claim survive a push nobody ran the suite before.
+#
+#  Two jobs, both on the `engines` floor (Node 22) and on the version the work
+#  is actually done on (Node 24), because "it works on my machine" is the one
+#  failure a matrix removes for free:
+#
+#    backend   npm ci -> typecheck -> lint -> IMPORT CYCLES -> test
+#    frontend  npm ci -> next build
+#
+#  ── Why the checks after `npm ci` all carry an `if:` ─────────────────────────
+#  By default a failed step ends the job, so a typecheck error would hide
+#  whether the tests also broke. Each check is therefore gated on the INSTALL
+#  having succeeded rather than on the previous check, and one run reports every
+#  signal at once. If the install fails, none of them run — they would only
+#  produce noise about missing modules.
+#
+#  `!cancelled()` is doing the real work in that condition and is NOT optional:
+#  a step whose `if:` contains no status-check function still has an implicit
+#  `success()` ANDed onto it, so `steps.install.outcome == 'success'` alone
+#  would skip on any earlier failure — exactly the behaviour being removed here.
+#
+#  ── What is deliberately NOT here ───────────────────────────────────────────
+#  There is no frontend lint step. `npx next lint` exits 1 today on 5
+#  pre-existing errors (1 react/display-name in components/.../cardShell.js,
+#  4 react/no-unescaped-entities across two conversion components), all of them
+#  cosmetic. A CI step that is red the day it lands teaches everyone to ignore
+#  red CI, which costs more than the five errors do. Fix those five, then add:
+#
+#      - name: Lint
+#        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+#        run: npx --no-install next lint
+#
+#  The backend IS linted, and `npm run lint` there is at 0 errors.
+# =============================================================================
+
+name: CI
+
+on:
+    push:
+        branches: ['**']
+    pull_request:
+
+# Read-only. Nothing here publishes, comments, or writes to the repository.
+permissions:
+    contents: read
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    backend:
+        name: backend (node ${{ matrix.node }})
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+
+        strategy:
+            fail-fast: false
+            matrix:
+                # 22 is the `engines` floor in backend/package.json — the version
+                # the project promises to run on. 24 is current.
+                node: ['22', '24']
+
+        defaults:
+            run:
+                working-directory: backend
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ matrix.node }}
+                  cache: npm
+                  cache-dependency-path: backend/package-lock.json
+
+            - name: Install
+              id: install
+              run: npm ci
+
+            - name: Typecheck
+              if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+              run: npm run typecheck
+
+            - name: Lint
+              if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+              run: npm run lint
+
+            # =================================================================
+            #  IMPORT CYCLES — the reason this workflow exists at all
+            # =================================================================
+            #
+            #  Every module in this codebase ends in `export = { ... }`, which
+            #  makes `module.exports` a single object ASSIGNED AT THE END of the
+            #  file. In a require cycle, whichever module loads second receives
+            #  the first one's exports BEFORE that assignment happens — an empty
+            #  object. Every property read off it is `undefined`.
+            #
+            #  Nothing catches this:
+            #
+            #    - `tsc --noEmit` sees the TYPES, which are correct. A cycle is
+            #      legal TypeScript and legal CommonJS.
+            #    - `eslint` sees one file at a time and has no rule enabled that
+            #      crosses module boundaries.
+            #    - The app often still starts, because the undefined only bites
+            #      when the affected call site is reached.
+            #
+            #  It has already happened here once, and nothing in the failing
+            #  output named a cycle. Node DOES warn — "Accessing
+            #  non-existent property 'x' of module exports inside circular
+            #  dependency" — but it writes it to STDERR and STILL EXITS 0, so a
+            #  plain `node -e "require(...)"` passes while printing the bug.
+            #
+            #  Hence: load each module's public entry point in a fresh process,
+            #  capture stderr, and FAIL on that warning. `--trace-warnings` turns
+            #  the one-line warning into a stack that names the file and line of
+            #  the offending read.
+            #
+            #  This is the only automated place the bug class can be caught, so
+            #  it must never be softened into a warning.
+            # =================================================================
+            - name: Import cycles
+              if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+              shell: bash
+              run: |
+                  set -uo pipefail
+                  # This loop inspects exit codes itself; `-e` would abort the
+                  # step on the first bad module instead of reporting them all.
+                  set +e
+
+                  status=0
+                  found=0
+
+                  for entry in src/modules/*/index.ts; do
+                      [ -e "$entry" ] || continue
+                      module=$(basename "$(dirname "$entry")")
+                      found=$((found + 1))
+
+                      output=$(node --trace-warnings -r ts-node/register/transpile-only \
+                          -e "require('./${entry}')" 2>&1)
+                      code=$?
+
+                      if [ "$code" -ne 0 ]; then
+                          echo "::error file=backend/${entry}::module '${module}' failed to load (exit ${code})"
+                          printf '%s\n' "$output"
+                          status=1
+                          continue
+                      fi
+
+                      if printf '%s' "$output" | grep -qi 'circular dependency'; then
+                          echo "::error file=backend/${entry}::IMPORT CYCLE in module '${module}' — a consumer read a property off a half-initialised module.exports. Break the cycle; do not silence the warning."
+                          printf '%s\n' "$output"
+                          status=1
+                          continue
+                      fi
+
+                      if [ -n "$output" ]; then
+                          echo "  ~ ${module}: loaded, but wrote to stderr:"
+                          printf '%s\n' "$output"
+                      else
+                          echo "  ok ${module}"
+                      fi
+                  done
+
+                  # A check that silently verifies nothing is worse than no
+                  # check: if the layout moves, this must go red, not green.
+                  if [ "$found" -eq 0 ]; then
+                      echo "::error::no src/modules/*/index.ts matched — this check verified NOTHING. Fix the glob."
+                      exit 1
+                  fi
+
+                  # Informational: a module with no index.ts is never loaded
+                  # here, so a cycle inside it is invisible to this check.
+                  for dir in src/modules/*/; do
+                      [ -f "${dir}index.ts" ] || echo "  - note: ${dir} has no index.ts, so this check never loads it"
+                  done
+
+                  echo "checked ${found} module entry points"
+                  exit $status
+
+            # =================================================================
+            #  TESTS
+            # =================================================================
+            #  519 assertions at the time this workflow landed, `node --test`
+            #  against in-memory fixtures — no database, no network, no secrets,
+            #  which is why this job needs no services and no environment.
+            #
+            #  test/routeGuard.test.js is the one that matters most: it walks the
+            #  live Express stack and fails on any /api/* route reachable without
+            #  `verifyAdmin`. Until this workflow existed, nothing ran it unless
+            #  a human remembered to.
+            # =================================================================
+            - name: Test
+              if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+              run: npm test
+
+    frontend:
+        name: frontend (node ${{ matrix.node }})
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+
+        strategy:
+            fail-fast: false
+            matrix:
+                node: ['22', '24']
+
+        defaults:
+            run:
+                working-directory: frontend
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ matrix.node }}
+                  cache: npm
+                  cache-dependency-path: frontend/package-lock.json
+
+            - name: Install
+              id: install
+              run: npm ci
+
+            # `--no-lint` because the build must not double as the lint gate —
+            # see the note at the top of this file.
+            #
+            # `--no-install` on npx is not cosmetic: without it, an npx that
+            # cannot resolve `next` locally SILENTLY DOWNLOADS THE LATEST from
+            # the registry and builds with that instead. Next 16 has already
+            # dropped `--no-lint`, so the failure surfaces as "unknown option"
+            # rather than as anything about the wrong version being used.
+            - name: Build
+              if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+              run: npx --no-install next build --no-lint

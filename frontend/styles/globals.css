@@ -1,0 +1,75 @@
+/* =============================================================================
+   Global resets — everything else is Polaris.
+   =============================================================================
+
+   Imported FIRST in _app.js, before Polaris's own stylesheet, so that on any tie
+   Polaris wins. This file exists to normalise the document, not to restyle
+   components: nine data-dense pages built entirely from Polaris primitives need
+   almost nothing here, and anything added is a rule that will one day fight a
+   Polaris component and win by accident.
+
+   ⚠️ ONE RULE WAS DELIBERATELY NOT CARRIED OVER from the dashboard this was
+   extracted from:
+
+       button { padding: 0.5rem 1rem; font-weight: bold; }
+
+   It is an unscoped element selector, so it applies to every Polaris Button,
+   Tab, Pagination arrow and IndexTable sort header in the app — re-padding
+   controls whose size Polaris computes from its own spacing tokens. In the
+   source dashboard the damage was invisible because that stylesheet was never
+   actually imported. Don't reintroduce it.
+   ============================================================================= */
+
+html,
+body {
+    padding: 0;
+    margin: 0;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+/* Links inside Polaris components are styled by Polaris; this only covers the
+   bare <a> a page wraps around a card or a table row. */
+a {
+    color: inherit;
+    text-decoration: none;
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* =============================================================================
+   Sign-in screen — the one page with no nav and no Frame around it.
+   =============================================================================
+
+   Two classes, both scoped with a `login-` prefix and used only by pages/login.js.
+   They exist because centring a fixed-width card in the viewport is layout, and
+   Polaris's Page/Layout components are built for a screen that has an app frame
+   around it — which this page deliberately does not.
+
+   `min-height: 100dvh` rather than `100vh`: on mobile browsers the `vh` unit is
+   measured against the viewport WITHOUT the collapsing address bar, so a 100vh
+   box is taller than what you can see and a vertically centred card sits below
+   the fold until you scroll. `dvh` tracks the visible height. The `100vh` line
+   before it is the fallback for browsers that do not know `dvh` — order matters,
+   the later declaration wins where it is understood.
+   ============================================================================= */
+
+.login-viewport {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: 1.5rem;
+    background: var(--p-color-bg-surface-secondary, #f1f1f1);
+}
+
+.login-panel {
+    width: 100%;
+    max-width: 26rem;
+}

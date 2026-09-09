@@ -1,0 +1,52 @@
+# =============================================================================
+#  Repository root.
+# =============================================================================
+#  The per-app .gitignore files cover backend/ and frontend/. This one exists
+#  for the Docker stack, which introduced a root-level .env.
+# =============================================================================
+
+#  The compose stack's environment: Partner API token, admin password, JWT
+# secret. `.env.example` is the file that belongs in version control.
+.env
+.env.*
+!.env.example
+
+.DS_Store
+
+docs/
+
+# ── Credential files ────────────────────────────────────────────────────────
+# Not hypothetical: `.env.example` invites an operator to point
+# GOOGLE_APPLICATION_CREDENTIALS at a service-account key on disk, and the
+# obvious place to put it is right here. Without these lines a file named
+# `gcp-key.json` in this directory is TRACKED, and a key that reaches a public
+# repository is compromised the moment it is pushed — rotating it is the only
+# remedy, and history rewriting does not help once it has been fetched.
+*.pem
+*.key
+*.p12
+*.pfx
+*-key.json
+*service-account*.json
+*credentials*.json
+secret/
+secrets/
+
+# SSH / GPG private keys. `*.key` and `*.pem` above miss the conventional
+# OpenSSH filenames, which carry no extension at all.
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.ppk
+*.jks
+*.keystore
+.npmrc
+.netrc
+.pgpass
+
+# Vendored working notes and third-party material. Excluded from publication
+# deliberately, not incidentally: this lived only in .git/info/exclude, which is
+# machine-local and travels with no clone — so any other checkout was one
+# `git add -A` away from publishing it.
+AlgoDocs/

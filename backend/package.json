@@ -1,0 +1,46 @@
+{
+    "name": "shopify-app-analytics-backend",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Self-hostable analytics backend for Shopify app developers \u2014 MRR, cohorts, trials and churn from the Partner API.",
+    "license": "SEE LICENSE IN ../LICENSE",
+    "type": "commonjs",
+    "main": "src/apps/app.ts",
+    "engines": {
+        "node": ">=22"
+    },
+    "scripts": {
+        "start": "node -r ts-node/register/transpile-only src/apps/app.ts",
+        "dev": "node --watch -r ts-node/register/transpile-only src/apps/app.ts",
+        "typecheck": "tsc --noEmit",
+        "test": "node -r ts-node/register/transpile-only --test --test-reporter=spec \"test/*.test.js\"",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "seed:demo": "node -r ts-node/register/transpile-only src/scripts/seedDemo.ts",
+        "seed:demo:down": "node -r ts-node/register/transpile-only src/scripts/teardownDemo.ts",
+        "seed:demo:dist": "node dist/scripts/seedDemo.js",
+        "seed:demo:down:dist": "node dist/scripts/teardownDemo.js"
+    },
+    "dependencies": {
+        "@google-cloud/bigquery": "^9.0.2",
+        "axios": "^1.13.2",
+        "bcryptjs": "^3.0.3",
+        "dotenv": "^17.4.2",
+        "express": "^5.0.8",
+        "helmet": "^8.3.0",
+        "jsonwebtoken": "^9.0.2",
+        "mongoose": "^9.7.4",
+        "stopcock": "^1.1.0"
+    },
+    "devDependencies": {
+        "@stylistic/eslint-plugin": "^5.10.0",
+        "@types/express": "^5.0.5",
+        "@types/jsonwebtoken": "^9.0.10",
+        "@types/node": "^26.2.0",
+        "eslint": "^10.4.1",
+        "globals": "^17.6.0",
+        "ts-node": "^10.9.2",
+        "typescript": "^6.0.3",
+        "typescript-eslint": "^8.67.0"
+    }
+}

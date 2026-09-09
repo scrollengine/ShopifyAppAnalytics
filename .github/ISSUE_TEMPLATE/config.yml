@@ -1,0 +1,22 @@
+# Blank issues stay ON deliberately. Questions and design discussion are welcome
+# right now — a template should not be the price of asking one.
+blank_issues_enabled: true
+
+contact_links:
+    - name: Security vulnerability (do not open an issue)
+      url: https://github.com/scrollengine/ShopifyAppAnalytics/blob/main/SECURITY.md
+      about: >
+          Report it by email instead. A public issue is a set of directions to
+          somebody else's revenue data before they can patch.
+
+    - name: Can I open a pull request?
+      url: https://github.com/scrollengine/ShopifyAppAnalytics/blob/main/CONTRIBUTING.md
+      about: >
+          Not yet, and the reason is a licensing fact rather than a policy about
+          you. Read this before writing code.
+
+    - name: Licensing, or a commercial licence
+      url: https://github.com/scrollengine/ShopifyAppAnalytics/blob/main/LICENSE
+      about: >
+          PolyForm Internal Use 1.0.0 — what it does and does not allow, and the
+          address to write to for rights it does not grant.

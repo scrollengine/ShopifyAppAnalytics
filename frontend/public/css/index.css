@@ -1,0 +1,199 @@
+/* =============================================================================
+   The only hand-written component CSS in the dashboard.
+
+   Two blocks, both of them things a style OBJECT cannot express: an overlay that
+   has to reach a Polaris-rendered element it does not own, and a button that
+   needs :hover / :focus-visible. Everything else in the nine Performance pages
+   is Polaris components and Polaris tokens, and should stay that way.
+
+   ⚠️ IMPORTED BEFORE Polaris's stylesheet in _app.js. Both blocks below win their
+   overrides on SPECIFICITY, not on source order, precisely so that this ordering
+   is not load-bearing — but keep the order anyway, so a rule added later that
+   does depend on it behaves the way its author expected.
+
+   ── LEFT BEHIND on purpose, when this was extracted ─────────────────────────
+   The source stylesheet also carried Leaflet map sizing and z-index fixes, a
+   sticky last-column rule for IndexTable, a `[data-wide-modal]` opt-in that
+   widened a Polaris `large` modal past its 61.25rem cap, and a rule hiding the
+   number-input spinner on `Polaris-TextField`. None is referenced by any of the
+   nine Performance pages — there is no map, no sticky table, no wide modal and
+   no number field among them. They live in the source dashboard's history if a
+   later slice needs one.
+   ============================================================================= */
+
+/* ── Right-side slide-over panel ────────────────────────────────────────────
+   The overlay behind `components/growth-intel/SlideOverPanel.js`. Lives here, not
+   in inline styles, because it needs to reach the Polaris-rendered
+   `.Polaris-Backdrop` that the panel composes for its scroll lock.
+
+    Z-INDEX: `--p-z-index-11` (519) is the SAME layer Polaris `Modal` uses,
+   deliberately — there is no integer between Modal (519) and Toast (520), and
+   sitting at 520 would paint the panel OVER toasts. Sharing the layer means a
+   panel opened while a Polaris `Modal` is already up has to win that tie, and it
+   does, on DOM order. Both are React portals appended to <body>, and the panel's
+   portal mounts strictly LATER than the overlay it opens from, so it is later in
+   the document and paints above. Do not "fix" this by raising the value.
+
+   The panel is `position: fixed`, so it escapes every ancestor — but only
+   because nothing between it and <body> creates a containing block. It is
+   portaled to <body> precisely so a `transform` or `filter` on a page wrapper
+   can never turn it into a 300px-wide box inside a card. */
+.se-slideover {
+    position: fixed;
+    inset: 0;
+    z-index: var(--p-z-index-11);
+}
+
+/* Polaris `Backdrop` fades IN with a keyframe animation and has no fade-out, so
+   on close it would vanish instantly while the panel is still sliding away.
+   Replaced with a transition driven by the same `--entered` class as the panel,
+   so both halves of the animation stay in step.
+   (0,2,0) beats Polaris's own (0,1,0) regardless of stylesheet order. */
+.se-slideover .Polaris-Backdrop {
+    /*  `z-index: 0`, overriding Polaris's 518, is what keeps the backdrop BEHIND
+       the panel. `.se-slideover` is a stacking context (fixed + z-index), so its
+       children are ordered among themselves — and a positioned child at 518
+       paints above a positioned child at `auto` no matter which comes first in
+       the DOM. Left alone, the backdrop covered the panel: everything looked
+       dimmed and every control in the panel was unclickable, because the
+       backdrop was swallowing the pointer events. Two local levels, 0 and 1, so
+       the pairing does not depend on Polaris's numbers at all. */
+    z-index: 0;
+    animation: none;
+    opacity: 0;
+    transition: opacity var(--p-motion-duration-300) var(--p-motion-ease);
+}
+
+/* Polaris hardcodes `rgba(0,0,0,0.5)` and ignores `--p-color-backdrop-bg`. Backdrops
+   COMPOUND, and these overlays nest — the store drawer opens from inside the
+   revenue-movement panel, which already has one up. At Polaris's 0.5 apiece the two
+   reach ~0.75 and the page behind reads as switched off rather than as still there.
+   A panel is a peek, not a takeover, so it dims less: ~0.32 alone, ~0.54 stacked. */
+.se-slideover .Polaris-Backdrop {
+    background-color: rgba(0, 0, 0, 0.32);
+}
+
+.se-slideover--entered .Polaris-Backdrop {
+    opacity: 1;
+}
+
+.se-slideover__panel {
+    position: fixed;
+    /* Above the backdrop, within `.se-slideover`'s own stacking context. */
+    z-index: 1;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    /* min() rather than a flat width so a narrow viewport still gets the whole
+       panel instead of a horizontally clipped one. */
+    width: var(--se-slideover-width, min(52rem, 100vw));
+    max-width: 100vw;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--p-color-bg);
+    box-shadow: var(--p-shadow-600);
+    border-inline-start: var(--p-border-width-025) solid var(--p-color-border-secondary);
+    transform: translateX(100%);
+    transition: transform var(--p-motion-duration-300) var(--p-motion-ease);
+    will-change: transform;
+    backface-visibility: hidden;
+    outline: 0;
+}
+
+.se-slideover--entered .se-slideover__panel {
+    transform: translateX(0);
+}
+
+/*  The overlay stops intercepting clicks the moment it starts leaving, not when
+   JS finally unmounts it.
+
+   `mounted` outlives `open` by a hardcoded 300ms so the panel can slide out, but
+   the root is `position: fixed; inset: 0` and the backdrop at `opacity: 0` is
+   still fully hit-testable — so for that whole window a click on the list behind
+   lands on the backdrop and is swallowed by a now-no-op `onClose`. Under
+   `prefers-reduced-motion` the transition is 1ms while the timer is still 300ms,
+   which makes the dead zone completely invisible: the panel is gone, and the next
+   click on a store row silently does nothing.
+
+   Keyed off the same class that drives the animation, so the two cannot disagree.
+   Harmless during the one frame before entry, when there is nothing to click. */
+.se-slideover:not(.se-slideover--entered) {
+    pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .se-slideover__panel,
+    .se-slideover .Polaris-Backdrop {
+        transition-duration: 1ms;
+    }
+}
+
+/* Header and footer stay put; only the body scrolls. `flex: 0 0 auto` on both
+   is load-bearing — without it a long body compresses the header away. */
+.se-slideover__header {
+    flex: 0 0 auto;
+    padding: var(--p-space-400);
+    background-color: var(--p-color-bg-surface);
+    border-block-end: var(--p-border-width-025) solid var(--p-color-border-secondary);
+}
+
+.se-slideover__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: var(--p-space-400);
+    /* Momentum scrolling inside the panel while the page behind is locked. */
+    -webkit-overflow-scrolling: touch;
+}
+
+.se-slideover__footer {
+    flex: 0 0 auto;
+    padding: var(--p-space-300) var(--p-space-400);
+    background-color: var(--p-color-bg-surface);
+    border-block-start: var(--p-border-width-025) solid var(--p-color-border-secondary);
+}
+
+
+/* ── Clickable MRR movement stat ────────────────────────────────────────────
+   The drill-down control behind `components/growth-intel/RevenueMovementStats.js`.
+   A stat block becomes a real <button> when its bucket has stores to list, so it
+   stays keyboard-reachable and screen-reader-announced; this strips the button's
+   own chrome so it still LOOKS like the static blocks beside it, and adds the
+   hover/focus affordance that says it is not one.
+
+   Lives here rather than inline because `:hover` and `:focus-visible` cannot be
+   expressed as a style object.
+
+   ⚠️ The negative margin cancels the padding: without it the clickable blocks
+   would sit 0.5rem in from the non-clickable ones and the six-block strip would
+   no longer line up. */
+.se-movement-stat {
+    display: block;
+    width: 100%;
+    text-align: start;
+    background: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    padding: var(--p-space-200);
+    margin: calc(var(--p-space-200) * -1);
+    border-radius: var(--p-border-radius-200);
+    cursor: pointer;
+    transition: background-color var(--p-motion-duration-100) var(--p-motion-ease);
+}
+
+.se-movement-stat:hover {
+    background-color: var(--p-color-bg-surface-hover);
+}
+
+.se-movement-stat:focus-visible {
+    outline: var(--p-border-width-050) solid var(--p-color-border-focus);
+    outline-offset: var(--p-space-050);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .se-movement-stat {
+        transition-duration: 1ms;
+    }
+}

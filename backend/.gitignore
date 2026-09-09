@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+
+# Build output. Nothing here is ever run — `npm start` goes through ts-node's
+# transpile-only hook and reads the .ts directly. An emit that landed next to
+# the sources would be worse than useless: Node resolves .js before .ts, so a
+# stale artifact would silently shadow the file it was built from.
+dist/
+*.tsbuildinfo
+
+# Secrets. .env.example is the tracked template; .env never is.
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Test / tooling output
+coverage/
+
+# OS noise
+.DS_Store
+
+
+secret/
+
+# ── Credential files ────────────────────────────────────────────────────────
+# Not hypothetical: `.env.example` invites an operator to point
+# GOOGLE_APPLICATION_CREDENTIALS at a service-account key on disk, and the
+# obvious place to put it is right here. Without these lines a file named
+# `gcp-key.json` in this directory is TRACKED, and a key that reaches a public
+# repository is compromised the moment it is pushed — rotating it is the only
+# remedy, and history rewriting does not help once it has been fetched.
+*.pem
+*.key
+*.p12
+*.pfx
+*-key.json
+*service-account*.json
+*credentials*.json
+secret/
+secrets/
+
+# SSH / GPG private keys. `*.key` and `*.pem` above miss the conventional
+# OpenSSH filenames, which carry no extension at all.
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.ppk
+*.jks
+*.keystore
+.npmrc
+.netrc
+.pgpass
