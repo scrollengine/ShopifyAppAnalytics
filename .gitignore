@@ -13,7 +13,12 @@
 
 .DS_Store
 
-docs/
+# ANCHORED. Unanchored, `docs/` matches at every depth — it was silently
+# swallowing `backend/docs/` including the `.gitkeep` placed there to make the
+# directory trackable, and would have taken any future `frontend/docs/` or
+# `.github/docs/` with it. Each ignored docs tree is now named on purpose.
+/docs/
+backend/docs/
 
 # ── Credential files ────────────────────────────────────────────────────────
 # Not hypothetical: `.env.example` invites an operator to point
@@ -50,3 +55,25 @@ id_ed25519
 # machine-local and travels with no clone — so any other checkout was one
 # `git add -A` away from publishing it.
 AlgoDocs/
+
+# Google service-account keys, by FILENAME rather than by location.
+# Google's own download name is <project-id>-<12 hex>.json, which matches none
+# of the *-key.json / *service-account*.json / *credentials*.json rules above.
+# Until now the only thing standing between a live BigQuery credential and a
+# `git add -A` was the `secret/` DIRECTORY rule in backend/.gitignore — one
+# `mv`, or one operator who downloads the key somewhere else, and it ships.
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+adc.json
+sa.json
+gha-creds-*.json
+.gcloud/
+.config/gcloud/
+
+# Editor backups. `.env~` is a byte-for-byte copy of `.env` — which holds the
+# Partner API token, the admin password and the JWT signing key. These were
+# ignored ONLY by the machine-local global excludes, which travel with no clone,
+# so every contributor was unprotected. Same trap the AlgoDocs note above records.
+*~
+*.swp
+*.swo
+.envrc
