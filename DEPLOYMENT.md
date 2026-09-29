@@ -23,8 +23,13 @@ Only the dashboard is published. The browser talks to it and nothing else: `next
 `/api/*` and `/healthz` through to the backend over the private compose network, which is why there
 is no CORS configuration anywhere in this project and no reason to expose the API to your LAN.
 
-> **Want to look around before wiring up credentials?** Bring the stack up with the two admin values
-> and a `JWT_SECRET` only, then run
+> **Want to look around before wiring up credentials?** Fill the REQUIRED block of `.env` with
+> placeholders — any number for `SHOPIFY_PARTNER_ORG_ID`, any string for the token, a made-up
+> `SMTP_HOST` and `SMTP_FROM`, `APP_PUBLIC_URL=http://localhost:3000` — plus a real `JWT_SECRET`, and
+> leave `SHOPIFY_PARTNER_APP_ID` blank. The backend boots and warns that mail cannot be reached and
+> that no app is registered; both are expected here. Create your account without email —
+> `docker compose exec backend npm run auth:admin:dist -- setup-link --email you@example.com --name "Your Name"`
+> prints the setup link; open it and choose a password — then run
 > `docker compose exec backend npm run seed:demo:dist`. It writes a self-consistent fictional dataset —
 > stores, trials, subscriptions, payouts, listing attribution — sets the watermarks, and recomputes
 > the coverage gates from the rows it wrote, so every screen fills in. It **refuses to run against
@@ -32,7 +37,7 @@ is no CORS configuration anywhere in this project and no reason to expose the AP
 > not write. `docker compose exec backend npm run seed:demo:down:dist` removes exactly what it
 > wrote. (The `:dist` suffix is not a typo: the image ships only compiled output, so the plain
 > `seed:demo` — which loads TypeScript through ts-node — exists for a source checkout and cannot
-> run in the container.) Do not run it on the deployment
+> run in the container; the same goes for `auth:admin`.) Do not run it on the deployment
 > you intend to keep.
 
 **Requirements:** Docker Engine with Compose v2 (`docker compose`, not `docker-compose`), about
@@ -74,23 +79,58 @@ git check-ignore .env
 
 ---
 
-### Step 3 — fill in six values
+### Step 3 — fill in the required values
 
-Open `.env` and set these six. Everything else in the file is either pre-filled correctly for Docker
-or genuinely optional.
+Open `.env` and set these. Everything else in the file is either pre-filled correctly for Docker or
+genuinely optional.
 
 ```dotenv
+# Shopify Partner API — section 2 says where each one comes from
 SHOPIFY_PARTNER_ORG_ID=1234567
 SHOPIFY_PARTNER_API_TOKEN=prtapi_xxxxxxxxxxxxxxxxxxxxxxxx
 SHOPIFY_PARTNER_APP_ID=7654321
-ADMIN_EMAIL=you@yourcompany.com
-ADMIN_PASSWORD=a-long-passphrase-you-will-type-at-the-login-screen
+
+# Signs session tokens
 JWT_SECRET=<paste the output of: openssl rand -hex 32>
+
+# The address you open the dashboard at. Every emailed link is built from it.
+APP_PUBLIC_URL=http://localhost:3000
+
+# Who may claim first-run setup. Strongly recommended: without it, setup is first-come.
+SETUP_OWNER_EMAIL=you@yourcompany.com
+
+# Outgoing mail. Gmail shown; any SMTP server works.
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=you@gmail.com
+SMTP_PASS=abcdefghijklmnop
+SMTP_FROM=you@gmail.com
 ```
 
-Where the first three come from is [section 2](#2-getting-the-credentials). `MONGO_URI` needs no
+Where the Partner values come from is [section 2](#2-getting-the-credentials). `MONGO_URI` needs no
 attention — `docker-compose.yml` sets it to the `mongo` service explicitly and that overrides
 whatever is in your file.
+
+**There is no sign-in password in `.env`.** You create the owner account in the browser in
+[step 5](#step-5--create-the-owner-account-then-sign-in), and everyone else joins by emailed
+invitation. That is why mail is required rather than optional: the setup confirmation, invitations
+and password resets all travel by email, and the dashboard deliberately has no copy-this-link
+fallback.
+
+- **`SMTP_PASS` for Gmail is an *app password*** — 16 letters created at
+  <https://myaccount.google.com/apppasswords>, which needs 2-Step Verification switched on — never
+  your Google account password. Paste it with or without the spaces Google shows; for
+  `smtp.gmail.com` they are removed. [`SETUP.md` § 2.3](./SETUP.md#23-outgoing-mail) walks through
+  it and gives the settings for any other SMTP server.
+- **`APP_PUBLIC_URL`** is what is in your browser's address bar: `http://localhost:3000` while you
+  try it on this machine, `https://analytics.yourcompany.com` once it sits behind TLS
+  ([section 8](#reverse-proxy-and-tls)). A `localhost` value works for you alone — links in
+  invitation emails would open only on this machine, and boot warns about exactly that. Never the
+  backend's internal `http://backend:8080`.
+- **`SETUP_OWNER_EMAIL`** closes the one window this design has: until setup completes, whoever
+  reaches the dashboard first becomes the owner. Set it to the address you will type on the setup
+  screen.
 
 > **The names in `.env.example` are the names the code reads.** Both example files were once out of
 > step with `backend/src/config/index.ts` — they carried `PARTNER_ORGANIZATION_ID`,
@@ -103,6 +143,10 @@ whatever is in your file.
 > read is simply ignored — the failure is loud in the other direction. Omit a required one and the
 > backend refuses to start with `CONFIGURATION ERROR: SHOPIFY_PARTNER_ORG_ID is not set.` and
 > restarts in a loop ([troubleshooting](#7-troubleshooting)).
+>
+> `ADMIN_EMAIL`, `ADMIN_PASSWORD` and `ADMIN_PASSWORD_HASH` belonged to the single-operator build. This
+> build ignores them and warns at boot while they are set; see
+> [Upgrading from a single-operator build](#upgrading-from-a-single-operator-build).
 
 > **The BigQuery values are optional, not inert.** `GCP_PROJECT_ID`, `BQ_DATASET` and credentials
 > **are** read, and filling them in switches on Traffic Sources, the listing steps at the top of the
@@ -149,30 +193,90 @@ docker compose logs backend | head -30
 ```
 [2026-09-02T10:44:01.123Z] [INFO] INFO: starting shopify-app-analytics backend
 { "node_env": "production", "port": 8080, "partner_org_id": "1234567",
-  "partner_api_token_present": true, "partner_app_id": "7654321", ... }
+  "partner_api_token_present": true, "partner_app_id": "7654321", ...,
+  "public_url": "http://localhost:3000", "mail_configured": true, "smtp_host": "smtp.gmail.com",
+  "smtp_port": 465, "smtp_secure": true, "smtp_login_present": true,
+  "setup_owner_email_pinned": true }
 [...] [INFO] INFO: connecting to mongo   { "uri": "mongodb://mongo:27017/shopify_app_analytics" }
 [...] [INFO] INFO: mongo connected
-[...] [INFO] INFO: auth: SEEDED the operator account — sign in with this email
-[...] [INFO] INFO: [Partner:App] Registered partner app
 [...] [INFO] INFO: api server listening
+[...] [INFO] INFO: auth: install state ready   { "id": "install", "created": true, "locked": false }
+[...] [INFO] INFO: auth: indexes ensured
+[...] [INFO] INFO: auth: setup is incomplete — only the address in SETUP_OWNER_EMAIL may claim it
+[...] [INFO] INFO: [Partner:App] Registered partner app
+[...] [INFO] INFO: mail: the mail server accepted the connection and the login
 [...] [INFO] INFO: boot: complete   { "next_sync_at": "2026-09-03T03:00:00.000Z", ... }
 ```
 
-`partner_api_token_present: true` is the token check — the value itself is never logged. If you see
-a `CONFIGURATION ERROR` block instead, it names the exact variable to add; go back to step 3.
+`partner_api_token_present: true` is the token check — the value itself is never logged, and neither
+are `SMTP_PASS` or the `SETUP_OWNER_EMAIL` address (only whether it is set). The mail line can land
+anywhere after `indexes ensured`: the check runs beside the rest of boot rather than holding it up.
+
+If you see a `CONFIGURATION ERROR` block instead, it names the exact variable to add; go back to
+step 3. Two lines to act on before going further:
+
+- `WARN: mail: the mail server check failed — emails will not be delivered until this is fixed` —
+  the setup email will not arrive either. Its `error_class` says why;
+  [troubleshooting](#7-troubleshooting) has the common ones.
+- `WARN: auth: SETUP IS OPEN — whoever reaches the dashboard first can create the owner account` —
+  `SETUP_OWNER_EMAIL` is not set. It means exactly what it says. Set it and
+  `docker compose up -d backend`, or bind the dashboard to loopback (`"127.0.0.1:3000:3000"` in
+  `docker-compose.yml`) until step 5 is done.
 
 ---
 
-### Step 5 — open the dashboard and sign in
+### Step 5 — create the owner account, then sign in
 
-Open **<http://localhost:3000>**.
+Open the address you put in `APP_PUBLIC_URL` — **<http://localhost:3000>** here.
 
-**You should see:** a redirect to `/login` and a sign-in form. Enter the `ADMIN_EMAIL` and
-`ADMIN_PASSWORD` from your `.env`.
+**You should see:** a redirect to `/login`, and from there straight on to **`/setup`**. On a
+database with no owner yet, the sign-in page checks and forwards you.
 
-**You should see:** the Revenue page, with every figure reading `—` and saying it has no data.
-That is correct at this point — nothing has been synced. `—` means *unknown*, never *zero*; the
-project would rather tell you it does not know than show you a `0.00` that reads like a fact.
+1. **Enter your email address and your name.** Use the `SETUP_OWNER_EMAIL` address if you set one.
+
+   **You should see:** *"If this address may set up this install, a verification email is on its
+   way."* That sentence is the same whether or not the address is allowed to claim setup — the page
+   never reveals which addresses are. The backend log is specific: `auth: setup verification link
+   handed to the mail server`, or `WARN: auth: setup request for a non-permitted email — nothing
+   sent`.
+2. **Open the email** — subject *"Confirm your email to finish setting up Shopify App Analytics"* —
+   and follow its link. It lasts `AUTH_SETUP_TOKEN_TTL_MINUTES` (60 minutes by default).
+
+   **You should see:** `/setup/verify`, naming the address being confirmed. Opening the link spends
+   nothing: the link is used only when you press the button, so a mail scanner that follows links
+   cannot use it up.
+3. **Choose a password** — at least 15 characters; a few unrelated words make a good one. There are
+   no composition rules. What is refused: anything over 72 bytes (bcrypt would silently ignore the
+   rest), one character repeated, a password on the built-in list of common long passwords, one that
+   contains the part of your email address before the `@`, and one that is just your name.
+
+   **You should see:** the sign-in page, saying setup is complete.
+4. **Sign in** with that email and password.
+
+   **You should see:** the Overview page, with every figure reading `—` and saying it has no data.
+   That is correct at this point — nothing has been synced. `—` means *unknown*, never *zero*; the
+   project would rather tell you it does not know than show you a `0.00` that reads like a fact.
+
+**Setup is now locked for good.** The lock is a flag stored in the database, never "there is at least
+one user", so disabling accounts cannot reopen it. Only an empty database can — see
+[Restore](#restore).
+
+> **The email did not arrive?** Check the spam folder, then the backend log
+> (`docker compose logs backend | grep -iE 'mail|auth: setup'`) — it says whether the message was
+> handed to the mail server and, if not, why. The setup page itself shows a warning when the boot
+> mail check failed. You can always skip email:
+>
+> ```bash
+> docker compose exec backend npm run auth:admin:dist -- setup-link --email you@yourcompany.com --name "Your Name"
+> ```
+>
+> prints the same link, under the same rule about who may claim setup
+> ([Account recovery](#account-recovery-cli)).
+
+**Everyone else joins by invitation.** Open **Users & roles** in the side nav → **Invitations**,
+enter their address and pick a role; they receive an email, choose their own name and password on
+`/accept-invite`, and sign in. What each role can see and do is in
+[Users, roles and permissions](#users-roles-and-permissions).
 
 ---
 
@@ -300,15 +404,17 @@ Every variable below is read in exactly one file — `backend/src/config/index.t
 everywhere else as `config.<SECTION>.<FIELD>`. Nothing else in `backend/src` reads `process.env`, and
 nothing writes to it.
 
-**This table is generated against that file and is exhaustive for the backend**: it lists all 53
+**This table is generated against that file and is exhaustive for the backend**: it lists all 70
 names `config/index.ts` reads, and nothing it does not. To check it yourself:
 
 ```bash
 grep -oE 'process\.env\.[A-Z0-9_]+' backend/src/config/index.ts | sort -u
 ```
 
-That command prints 54 lines: the 53 real names plus `process.env.X`, which occurs inside a comment
-illustrating the gate pattern rather than in code.
+That command prints 71 lines: the 70 real names plus `process.env.X`, which occurs inside a comment
+illustrating the gate pattern rather than in code. Three of the 70 — `ADMIN_EMAIL`, `ADMIN_PASSWORD`
+and `ADMIN_PASSWORD_HASH` — are read only so boot can warn that they are ignored; see
+[Legacy](#legacy--read-only-to-warn).
 
 (`NEXT_PUBLIC_API_BASE_URL`, at the end of Tier 3, is the one entry the backend does *not* read — it
 belongs to the dashboard container and is listed here because you set it in the same file.)
@@ -321,17 +427,40 @@ unusable. It lists every problem at once, so a fresh install is fixable in one p
 | variable | required | default | what it does | what breaks without it |
 |---|---|---|---|---|
 | `MONGO_URI` | yes | *none* | The one datastore. Must start `mongodb://` or `mongodb+srv://`. | Refuses to boot. **Under Docker, compose sets this for you** (`mongodb://mongo:27017/shopify_app_analytics`) and its value overrides your `.env`. |
-| `JWT_SECRET` | yes | *none* | Signs dashboard session tokens. Validated at **≥ 32 characters**. | Refuses to boot. There is deliberately no default: a shared one would let anyone mint an admin token for any install. |
-| `ADMIN_EMAIL` | yes | *none* | The single operator login. Must contain `@`. | Refuses to boot. There is no signup flow and no second user. |
-| `ADMIN_PASSWORD` | yes¹ | *none* | Plaintext password, bcrypt-hashed at **first boot only**. Validated at **≥ 12 characters**, and rejected if you paste a bcrypt hash into it. | Refuses to boot. Nobody can sign in. |
-| `ADMIN_PASSWORD_HASH` | yes¹ | *none* | A pre-computed bcrypt hash, stored verbatim. **Wins over `ADMIN_PASSWORD` when both are set.** | — Preferred for production: a plaintext password in the environment is readable in `ps`, in shell history and in `docker inspect`. |
+| `JWT_SECRET` | yes | *none* | Signs dashboard session tokens. Validated at **≥ 32 characters**. | Refuses to boot. There is deliberately no default: a shared one would let anyone mint a session token for any install. |
+| `APP_PUBLIC_URL` | yes | *none* | The address people open the dashboard at: an absolute `https://` URL (or `http://` for a machine-local install) with no path, query, fragment or `user:pass@`. Trailing slashes are stripped. **Every link in every email is built from it**, and from nothing in a request — a request's Host header is written by whoever sends it. | Refuses to boot. Boots with a warning on `http://` to another machine, on a loopback host (links then open only on that machine), and on the host `backend` or port `8080` — the internal proxy target, pasted by mistake. |
+| `SMTP_HOST` | yes | *none* | The mail server's host name — no scheme, path or port. The rest of the mail settings are in [Mail and first-run setup](#mail-and-first-run-setup). | Refuses to boot. Setup confirmation, invitations and password resets travel by email, and nothing else can deliver them. |
+| `SMTP_FROM` | yes¹ | *`SMTP_USER`, when that is an address* | The sender address — **one bare address**, no display name (that is `SMTP_FROM_NAME`). | Refuses to boot when neither it nor an address-shaped `SMTP_USER` is set, or when it carries a display name such as `Name <a@b.com>`. |
 | `SHOPIFY_PARTNER_ORG_ID` | yes | *none* | Your Partner organisation id. Digits only. | Refuses to boot. |
 | `SHOPIFY_PARTNER_API_TOKEN` | yes | *none* | Partner API access token. Never logged. | Refuses to boot. |
 | `SHOPIFY_PARTNER_API_VERSION` | no | `2026-07` | Partner API version, `YYYY-MM`. Validated for shape. | Refuses to boot on a malformed value. An out-of-support version is a hard 404 from Shopify, not a degraded response — this is a value to keep current, not to pin and forget. |
 | `SHOPIFY_PARTNER_APP_ID` | *in practice, yes* | *none* | Which app to report on. | **Warns and boots**, but no app row is created, so nothing ever syncs and every figure is unavailable. See [section 2](#2-getting-the-credentials). |
 
-¹ Supply **one** of `ADMIN_PASSWORD` / `ADMIN_PASSWORD_HASH`. Generate a hash with:
-`node -e "console.log(require('bcryptjs').hashSync(process.argv[1], 12))" 'your password'`
+¹ `SMTP_FROM` can stay blank when `SMTP_USER` is an email address, as it is for Gmail. A relay whose
+login is not an address — SendGrid's is literally `apikey` — needs it set.
+
+Three more refusals are not "one key missing": `SMTP_USER` without `SMTP_PASS` or the reverse, an
+`SMTP_PORT` outside 1–65535, and a `SETUP_OWNER_EMAIL` that is not a single bare address. Each is
+named the same way.
+
+### Mail and first-run setup
+
+The rest of the mail settings, and the one setting that governs first-run setup. The procedure —
+creating a Gmail app password, or pointing at any other SMTP server — is
+[`SETUP.md` § 2.3](./SETUP.md#23-outgoing-mail).
+
+"Sent", anywhere in this project, means **accepted by the mail server** — never delivered. Nothing
+here can know whether a message reached an inbox.
+
+| variable | required | default | what it does |
+|---|---|---|---|
+| `SMTP_PORT` | no | `465` when `SMTP_SECURE=true`, else `587` | The mail server's port. Boot warns on `465` without `SMTP_SECURE=true` (every send then times out waiting for a greeting) and on `587` with it (the TLS handshake fails). |
+| `SMTP_SECURE` | no | `false` | `true` = TLS from the first byte, the port-465 style. Unset = the connection starts plain and **must** upgrade with STARTTLS: a server that does not offer it is refused, never written to in the clear. The certificate is always verified, TLS 1.2 minimum. |
+| `SMTP_USER` / `SMTP_PASS` | both, or neither | *none* | The login. Neither = a relay that accepts mail without one. `SMTP_PASS` is trimmed at the ends; for `smtp.gmail.com` all whitespace inside it is removed as well (Google shows an app password as four groups of four letters), and nothing else ever alters it. Never logged — the boot line says `smtp_login_present`. For `smtp.gmail.com`, boot warns when the password is not 16 characters, which is what the Google *account* password pasted in place of an app password looks like. |
+| `SMTP_FROM_NAME` | no | `Shopify App Analytics` | The display name on the From line. |
+| `SMTP_ALLOW_INSECURE` | no | `false` | ⚠️ **For a local test relay only.** `true` allows an unencrypted session and any certificate: the SMTP password and every emailed link can then be read and altered on the network path. Boot warns loudly while it is set. |
+| `EMAIL_MAX_PER_HOUR` / `EMAIL_MAX_PER_DAY` | no | `30` / `200` | Caps on messages handed to the mail server — **per backend process, in memory**, so a restart resets them. Mail an anonymous request can cause (setup confirmation, forgot-password) may use at most **half** of each, so a stranger cannot spend the budget invitations and security notices need. Separately, no one address is sent more than 10 messages in 24 hours, and anonymously-caused mail may use only 5 of those, so resets requested by a stranger can never block that person's password-changed notice or an admin-sent reset. `0` means nothing is sent at all, and boot warns. The day default sits well under Gmail's limit of about 500 recipients a day. |
+| `SETUP_OWNER_EMAIL` | **strongly recommended** | *none* | The one address that may claim first-run setup. Unset, setup is restricted to the email(s) on accounts left by a single-operator build if the database has any, and is otherwise **first-come** — boot warns `SETUP IS OPEN` until setup completes. Lowercased; never logged (the boot line says only `setup_owner_email_pinned`). Checked per request, so a change takes effect at the next restart without touching the database. Irrelevant once setup is complete. |
 
 ### Tier 2 — the listing-analytics tier: optional, and fully built
 
@@ -407,10 +536,14 @@ Every one of these can be deleted and its default applies.
 | `MONGO_MAX_POOL_SIZE` / `MONGO_MIN_POOL_SIZE` | no | `10` / `0` | Connection pool bounds. | Nothing. |
 | `MONGO_SERVER_SELECTION_TIMEOUT_MS` | no | `10000` | How long the driver hunts for a node before failing a command. Kept short so a wrong URI fails at boot instead of hanging the first request. | Nothing. |
 | `MONGO_DISABLE_AUTO_INDEX` | no | `false` | `autoIndex` is **on**, so indexes are built at boot and there is no migration step. Set `true` on a large existing database where an index build at boot is a stall. | Nothing. ⚠️ `autoIndex` creates but **never drops** — removing an index from a schema leaves the physical index in place. |
-| `AUTH_TOKEN_TTL_HOURS` | no | `12` | Session lifetime. Must be ≥ 1 or no token is issued at all. | Nothing. Re-login is a password prompt, so short is cheap. |
-| `AUTH_BCRYPT_ROUNDS` | no | `12` | Hash cost at seed time. Clamped to 4–31. | Nothing. Changing it later does not re-hash the stored password. |
-| `AUTH_LOGIN_RATE_LIMIT_MAX` / `AUTH_LOGIN_RATE_LIMIT_WINDOW_MINUTES` | no | `10` / `15` | **Enforced** on `POST /api/auth/login` — the budget is *failed* attempts per client address, per rolling window. A success clears the tally and is never charged; a refusal is never charged either, so hammering cannot extend a block. Nothing is persisted: the state is one in-process Map, so **restarting the backend clears every block**. `AUTH_LOGIN_RATE_LIMIT_MAX=0` disables it. | Nothing. It fails **open** — a throw inside the limiter admits the request and logs, because a bug in a throttle must never become a denial of the only way in. |
-| `TRUST_PROXY` | no | `false` | ⚠️ **Decides whose address `req.ip` is, and `req.ip` is what the login rate limit counts against.** Accepts Express's own forms: `false`, `true`, a hop count (`1`), `loopback`, `linklocal`, `uniquelocal`, or a comma-separated list of addresses/CIDRs. | **Leave it unset for the bundled compose stack; set `uniquelocal` only behind the nginx recipe below.** The dashboard's `/api` rewrite forwards a caller-supplied `X-Forwarded-For` unchanged and never appends the real peer, so trusting it with nothing in front lets a caller choose their own rate-limit bucket. nginx's `$proxy_add_x_forwarded_for` appends the true peer, which is what makes `uniquelocal` correct there. Unset, the limit is enforced per **deployment** rather than per address — stricter, not weaker. Either way a spent budget still trickles, so no flood can lock the operator out. |
+| `AUTH_TOKEN_TTL_HOURS` | no | `12` | How long a sign-in lasts. Must be ≥ 1, or sign-in refuses to issue a token and logs why. The session is also re-read on every request, together with the user and their role, so signing someone out, disabling them or changing their role takes effect on their next request rather than at expiry. | Nothing. Re-login is a password prompt, so short is cheap. |
+| `AUTH_BCRYPT_ROUNDS` | no | `12` | Hash cost for passwords. Clamped to 4–31. | Nothing. A stored hash made at a different cost is re-hashed at this one the next time that person signs in. |
+| `AUTH_LOGIN_RATE_LIMIT_MAX` / `AUTH_LOGIN_RATE_LIMIT_WINDOW_MINUTES` | no | `10` / `15` | **Enforced** on `POST /api/auth/login` — the budget is *failed* attempts per client address, per rolling window. A success is never charged and clears nothing — otherwise any account holder could reset the count between guesses at someone else's password. A refusal is never charged either, so hammering cannot extend a block; an attempt the caller abandons after sending it is still charged, because the password check runs anyway. A browser that has signed in before carries a device token that gives its next sign-in a budget of its own, so a flood from elsewhere does not lock out a returning user. Nothing is persisted: the state is one in-process Map, so **restarting the backend clears every block**. `AUTH_LOGIN_RATE_LIMIT_MAX=0` disables it. | Nothing. It fails **open** — a throw inside the limiter admits the request and logs, because a bug in a throttle must never become a denial of the only way in. |
+| `AUTH_SETUP_TOKEN_TTL_MINUTES` | no | `60` | Lifetime of the setup-confirmation link. Clamped to between 1 minute and 7 days. | Nothing. Boot warns on `0` or less. |
+| `AUTH_INVITE_TTL_HOURS` | no | `72` | Lifetime of an invitation link. Clamped to 1–168 hours. Re-sending an invitation issues a new link with a fresh lifetime and kills the old one. | Nothing. Boot warns on `0` or less. |
+| `AUTH_PASSWORD_RESET_TTL_MINUTES` | no | `30` | Lifetime of a password-reset link, from the forgot-password page or sent by an admin. Clamped to between 1 minute and 7 days. A link printed by the recovery CLI lasts 15 minutes regardless. | Nothing. Boot warns on `0` or less. |
+| `AUTH_PUBLIC_FLOW_RATE_LIMIT_MAX` / `AUTH_PUBLIC_FLOW_RATE_LIMIT_WINDOW_MINUTES` | no | `10` / `15` | The budget for **each** of three limiters on the endpoints that work without signing in. The emailed-link pages (setup completion, invitation acceptance, password reset) are keyed on the link's token and charged only when the link is invalid, expired or revoked — so only the holder of a link can spend its budget, and a proxy address cannot pool them. Forgot-password and the setup request are keyed on the address and charged for every answer except a malformed request. Each has its own tally, separate from sign-in's, with the same window-not-lockout design and trickle. `0` or less switches **all three** off, and boot warns while it is. | Nothing. In process memory, like the login limiter: per process, and cleared by a restart. |
+| `TRUST_PROXY` | no | `false` | ⚠️ **Decides whose address `req.ip` is, and `req.ip` is what the login, forgot-password and setup-request limits count against** (the emailed-link limit is keyed on the token, so it is unaffected). It also decides whether setup, password-reset and password-changed emails can name the requesting address: they do only while this is set. Accepts Express's own forms: `false`, `true`, a hop count (`1`), `loopback`, `linklocal`, `uniquelocal`, or a comma-separated list of addresses/CIDRs. | **Leave it unset for the bundled compose stack; set `uniquelocal` only behind the nginx recipe below.** The dashboard's `/api` rewrite forwards a caller-supplied `X-Forwarded-For` unchanged and never appends the real peer, so trusting it with nothing in front lets a caller choose their own rate-limit bucket. nginx's `$proxy_add_x_forwarded_for` appends the true peer, which is what makes `uniquelocal` correct there. Unset, those limits are enforced per **deployment** rather than per address — stricter, not weaker. Either way a spent budget still trickles one attempt every 30 seconds, and anyone signing in from a browser they have used before has a budget of their own; a first sign-in from a new browser can still be kept waiting while someone floods the shared budget (see [Two budgets](#two-budgets-and-why-a-refusal-is-a-rate-rather-than-a-wall)). Boot warns whichever way it is set, and says which topology each is right for. |
 | `ACTIVE_SUB_WINDOW_DAYS` | no | `38` | How recently Shopify must have billed a shop for it to count as an active paid subscriber. **A measurement decision, not a performance knob** — changing it changes what the dashboard says happened. | Nothing breaks, but both directions of getting it wrong have shipped: too narrow produced a **47.6% churn** month in which nobody cancelled; too wide produced **$45M of MRR against $10K of real payouts**. Read FIDELITY §5 before touching it. |
 | `REVENUE_REPORTING_CURRENCY` | no | `USD` | A **label** for your payout currency. **Nothing in this codebase converts currencies.** | Nothing. If your payouts span currencies, `mrr` is downgraded to `estimated` and says so — but the *lifetime cash* block carries no such signal. |
 | `REVENUE_HISTORY_FLOOR_DATE` | no | *(unset — warns at boot)* | `YYYY-MM-DD`; the earliest date your records actually cover. | ⚠️ **Validated, echoed at boot, and consumed by no published figure yet.** Setting it does not currently cause anything to be published as unknown. Until a windowed endpoint uses it, the honest floor is the measured `coverage.earliest_transaction_at`. |
@@ -430,6 +563,12 @@ Every one of these can be deleted and its default applies.
 | `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` \| `silent`. An unrecognised value warns and falls back to `info`. | Nothing. |
 | `LOG_JSON` | no | `false` | One JSON object per line instead of human-readable text. Set it when shipping to an aggregator. | Nothing. |
 | `NEXT_PUBLIC_API_BASE_URL` | frontend only | `http://backend:8080` | Where the dashboard proxies `/api` and `/healthz`. **Compose sets it authoritatively** to `http://backend:${PORT:-8080}`. | The dashboard cannot reach the API. Must include a scheme — the frontend's entrypoint refuses to start without one and says so. |
+
+### Legacy — read only to warn
+
+| variable | status | what this build does with it |
+|---|---|---|
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_PASSWORD_HASH` | **ignored** | The single-operator build's login. This build reads them only to print `WARN: config: ADMIN_EMAIL / ADMIN_PASSWORD / ADMIN_PASSWORD_HASH are ignored by this build — delete them once you no longer need to roll back to a single-operator build.` While they are set, a configuration error that involves `APP_PUBLIC_URL`, `SMTP_HOST` or `SMTP_FROM` is headed `UPGRADING FROM A SINGLE-OPERATOR BUILD` and points at [the upgrade walk-through](#upgrading-from-a-single-operator-build). Nothing signs in with them. |
 
 ---
 
@@ -635,10 +774,9 @@ numbers.
 
 ### 5.5 What the API publishes, and what an empty page means
 
-This build publishes **38 endpoints** — two public, 36 behind the admin guard. Every dashboard screen
-has a working backend; none of them should be reporting "not built yet". (The screen count moved when
-Revenue absorbed the country and churn views as tabs; the endpoint count did not — three tabs, three
-endpoints, same three as before.)
+This build publishes **66 endpoints** — ten public, and 56 behind the sign-in guard, each of which
+also names the one permission it needs ([Users, roles and permissions](#users-roles-and-permissions)).
+Every dashboard screen has a working backend; none of them should be reporting "not built yet".
 
 Count them yourself:
 
@@ -648,7 +786,12 @@ grep -rE "^\s*router\.(get|post|put|patch|delete)\(" backend/src/routes/*.ts | w
 
 | area | endpoints |
 |---|---|
-| public | `GET /healthz`, `POST /api/auth/login` |
+| public (10) | `GET /healthz`; `POST /api/auth/login`; `GET` and `POST /api/auth/setup`, `POST /api/auth/setup/inspect`, `POST /api/auth/setup/complete`; `POST /api/auth/invites/inspect`, `POST /api/auth/invites/accept`; `POST /api/auth/password/forgot`, `POST /api/auth/password/reset` |
+| your own account (5) | `GET`/`PATCH /api/account`, `POST /api/account/password`, `POST /api/account/logout`, `POST /api/account/sessions/revoke-others` |
+| users (6) | `GET /api/users`, `PATCH /api/users/:user_id/role`, `POST /api/users/:user_id/disable`, `.../enable`, `.../sessions/revoke`, `.../password-reset` |
+| invitations (4) | `GET`/`POST /api/invites`, `POST /api/invites/:invite_id/resend`, `.../revoke` |
+| roles (4) | `GET`/`POST /api/roles`, `PATCH`/`DELETE /api/roles/:role_id` |
+| security activity log (1) | `GET /api/audit-events` |
 | partner apps (7) | `GET`/`POST` `/api/partner-apps`; `GET`/`PATCH`/`DELETE` `/api/partner-apps/:partner_app_id`; `GET .../events`; `GET .../kpi` |
 | sync (8) | `GET /api/sync/health`, `GET /api/sync/jobs`, `GET /api/sync/jobs/:job_id`, `POST /api/sync/jobs/:job_id/cancel`, `POST /api/sync/partner`, `POST /api/sync/bigquery`, `POST /api/sync/install-attribution`, `POST /api/sync/dummy` |
 | revenue (3) | `GET /api/revenue/now`, `GET /api/revenue/overview`, `POST /api/revenue/shop-plans` |
@@ -658,17 +801,18 @@ grep -rE "^\s*router\.(get|post|put|patch|delete)\(" backend/src/routes/*.ts | w
 | meta (1) | `GET /api/meta/coverage` |
 
 **If a page still says "not built yet", that is a real answer and worth reading.** The dashboard
-decodes every response into one of five states, and only one of them is a measured answer:
+decodes every response into one of six states, and only one of them is a measured answer:
 
 | the page says | what it means | what to do |
 |---|---|---|
 | **Not built yet** | No route serves it. The banner names the endpoint that would. | Nothing on this install fixes it — no sync, date range or filter. Three sources are deliberately in this state: keyword rankings, competitor snapshots and LLM briefings. |
+| **Restricted — your role does not include …** | The endpoint answered 403: your role lacks the permission it names. Not a reading of zero, and not an error. | Ask the owner or an admin for a role that includes it. (A page your role cannot open at all is left out of the side nav, and opening its address shows a full-page *Restricted* notice instead.) |
 | **Data source not connected** | An upstream is unconfigured. The banner names the **missing environment variable**. | Set it and restart the backend — [section 3](#3-environment-reference). |
 | **Nothing synced yet** | Configured, nothing has run. | Run a sync. This is not a reading of zero. |
 | **This could not be loaded** | The call failed, or your session expired. | Check `docker compose logs backend`. |
 | *(charts and tables)* | A measured answer. | Read it. |
 
-The four non-ready states **draw nothing in place of the chart**. That is the point, not an
+The five non-ready states **draw nothing in place of the chart**. That is the point, not an
 oversight: an explanatory banner above an empty chart is worse than useless, because the zeros are
 concrete and the sentence above them is not.
 
@@ -685,6 +829,13 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/partner-apps
 ⚠️ **Watch the id.** `GET /api/partner-apps` returns each app's Mongo `_id` as **`app_id`**, and
 that is the value you pass as **`partner_app_id`** to `/api/meta/coverage` and `/api/sync/partner`.
 The field called `partner_api_app_id` is Shopify's gid and is *not* interchangeable with it.
+
+The token is a **session**: it carries only your user id and a session id, and every request
+re-reads the session, your account and your role, so it can do exactly what your role allows and
+stops working the moment the session is ended. `POST /api/account/logout` with the same header ends
+it. A `403` names the missing permission in its body — `"error": {"code": "FORBIDDEN", "permission":
+"merchants:read"}` — and a `503` means the backend could not reach the database to check your
+session, not that you were signed out.
 
 ---
 
@@ -714,9 +865,67 @@ docker compose logs -f backend
   format is tied to its release series, so an unpinned tag can roll you onto a version that will not
   open your existing data files. Change the major only on purpose, with a backup in hand.
 
+### Upgrading from a single-operator build
+
+Earlier builds had one operator account, seeded from `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`. This
+build replaces it with a first-run setup screen, emailed invitations and roles. Read all of this
+before you pull.
+
+1. **Set `APP_PUBLIC_URL` and the `SMTP_*` settings in `.env` BEFORE pulling** —
+   [step 3](#step-3--fill-in-the-required-values). This build refuses to start without
+   `APP_PUBLIC_URL`, `SMTP_HOST` and a sender address (`SMTP_FROM`, or an address in `SMTP_USER`).
+   If you pull first, the backend restart-loops on a configuration error headed
+   `UPGRADING FROM A SINGLE-OPERATOR BUILD` that names whichever of the three are still missing.
+2. **Decide who claims setup.** With `SETUP_OWNER_EMAIL` unset, **only the old operator address(es)**
+   — the email(s) stored in `gi_admin_users`, which is your old `ADMIN_EMAIL` — may claim setup. The
+   confirmation link goes to the address typed on the setup screen, so **if `ADMIN_EMAIL` was not a
+   real mailbox you can read, set `SETUP_OWNER_EMAIL`** to one you can. It takes precedence over the
+   old address.
+3. Pull and rebuild as above (`git pull`, `docker compose build`, `docker compose up -d`), then read
+   the boot log. `auth: marked single-operator accounts as legacy` is expected, once.
+4. **Every existing session ends.** Tokens issued by the old build carry no session id and are
+   refused, so every open dashboard is sent to sign in, and sign-in forwards to `/setup` because no
+   owner exists yet. The old account cannot sign in again: it is kept for provenance — stamped
+   `legacy_at`, and listed on the Sync page as *Legacy operator accounts* — and sign-in never reads
+   it.
+5. **Claim setup** exactly as in [step 5](#step-5--create-the-owner-account-then-sign-in): the
+   operator address (or the `SETUP_OWNER_EMAIL` one), your name, the emailed link, and a **new**
+   password of at least 15 characters. The old password is not carried over.
+6. **If the email does not arrive**, print the link instead:
+
+   ```bash
+   docker compose exec backend npm run auth:admin:dist -- setup-link --email you@yourcompany.com --name "Your Name"
+   ```
+
+   If the backend is restart-looping, a setup link will not help yet: it opens `/setup/verify`,
+   which needs the running backend to finish setup, and it expires after
+   `AUTH_SETUP_TOKEN_TTL_MINUTES` (60 by default). Fix the error the boot log names first (usually a
+   missing `APP_PUBLIC_URL`, `SMTP_HOST` or `SMTP_FROM` — see step 1), bring the stack up with
+   `docker compose up -d`, then use the `exec` command above. To see the setup state and which
+   address the setup rule accepts while the server is down, run the CLI in a one-off container — it
+   needs only `MONGO_URI`:
+
+   ```bash
+   docker compose run --rm backend npm run auth:admin:dist -- status
+   ```
+7. **Keep `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_PASSWORD_HASH` until you are sure you will not
+   roll back.** This build ignores them and warns at every boot while they are set. The
+   single-operator build still requires them — and it ignores `legacy_at` — so checking out the old
+   commit and rebuilding signs you in with the old account and password exactly as before; the new
+   collections simply sit unused. Once you are staying, delete the three lines.
+
+   Rolling back does not hand the old build this build's sessions. The single-operator build accepts
+   any unexpired token signed with `JWT_SECRET` and checks nothing else — no session, no account —
+   so a token this build had issued to a Viewer, or to an account you disabled, would otherwise pass
+   there as the one full operator. This build never signs with `JWT_SECRET` itself: it signs with a
+   key derived from it, which the old build's check refuses. Nothing to do on a rollback; rotate
+   `JWT_SECRET` only if the secret itself may have leaked.
+8. **If you run the [reverse-proxy recipe](#reverse-proxy-and-tls), add its `limit_req` block for the
+   new public paths.** Setup, invitation acceptance and password reset all work without signing in.
+
 ### Backup
 
-Everything is in one Mongo database (`shopify_app_analytics`), in **nine** collections — one per
+Everything is in one Mongo database (`shopify_app_analytics`), in **sixteen** collections — one per
 schema in `backend/src/models`, and there are no others:
 
 | collection | holds |
@@ -725,14 +934,25 @@ schema in `backend/src/models`, and there are no others:
 | `gi_partner_app_events` | the event spine — installs, uninstalls, reinstalls, subscription charge events |
 | `gi_partner_app_transactions` | the payout ledger. **Every money figure is folded from this.** |
 | `gi_sync_jobs` | the job ledger. This collection *is* the queue; there is no broker. |
-| `gi_admin_users` | the single operator account |
 | `gi_listing_funnel_dailies` | GA4 daily listing rollup — views, install clicks, installs |
 | `gi_listing_source_dailies` | GA4 daily rollup by source/medium |
 | `gi_listing_geo_dailies` | GA4 daily rollup by country |
 | `gi_listing_install_attributions` | one row per install: its source, surface and result position |
+| `gi_system_states` | one document: whether first-run setup has completed (**the setup lock**) and which account is the owner |
+| `gi_users` | the accounts that can sign in, with their bcrypt password hashes, roles and status |
+| `gi_roles` | custom roles the owner created. Built-in roles live in code, so empty is normal. |
+| `gi_invites` | invitations and what became of them; the link is stored only as a sha256 hash |
+| `gi_auth_tokens` | setup-confirmation and password-reset links, as sha256 hashes; removed a week after they expire |
+| `gi_auth_sessions` | one row per sign-in; removed once expired |
+| `gi_audit_events` | the security activity log. Rows from anonymous requests expire after 180 days; the rest are kept. |
+| `gi_admin_users` | accounts from the single-operator build, marked legacy — never read by sign-in, kept for provenance. Absent on an install that never ran that build. |
 
-The last four exist only if you configured the [listing-analytics tier](#tier-2--the-listing-analytics-tier-optional-and-fully-built).
-Verify the list against the code with `ls backend/src/models/**/*.model.ts`.
+The four `gi_listing_*` collections exist only if you configured the
+[listing-analytics tier](#tier-2--the-listing-analytics-tier-optional-and-fully-built). Verify the
+list against the code with `ls backend/src/models/*/*.model.ts`.
+
+⚠️ **A backup holds password hashes and the security log** as well as your revenue history. Store
+the file the way you store `.env`.
 
 There is deliberately **no store collection.** The store roster is folded on read from the three
 Partner collections; see [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) §3.12 for why.
@@ -781,12 +1001,25 @@ docker compose up -d
 docker compose exec -T mongo mongorestore --archive --gzip --drop < dump-2026-09-02.gz
 ```
 
-**If you lose the database entirely, you have not lost the data** — it is a mirror of the Partner
-API. Bring the stack up with an empty volume and run a **Full re-sync (lifetime)**; it rebuilds
-everything from Shopify. That is slow, not fatal, and it is why the sync is idempotent (every write
-is an upsert against a unique key).
+**If you lose the database entirely, you have not lost the analytics data** — it is a mirror of the
+Partner API. Bring the stack up with an empty volume and run a **Full re-sync (lifetime)**; it
+rebuilds everything from Shopify. That is slow, not fatal, and it is why the sync is idempotent
+(every write is an upsert against a unique key). The accounts, custom roles and security log exist
+only in this database, though: they come back only from a backup.
 
 ⚠️ `docker compose down -v` **destroys the volume.** Plain `down` does not.
+
+⚠️ **An EMPTY database reopens first-run setup.** The setup lock is stored in the database
+(`gi_system_states`), so a backend that starts against an empty one — after `down -v`, a lost
+volume, or a restore that has not happened yet — creates a fresh, **open** install, and the setup
+screen is live again for whoever reaches it first. The only guards are `SETUP_OWNER_EMAIL` and the
+legacy operator rows, and an empty database has no legacy rows. So set `SETUP_OWNER_EMAIL` before you
+bring an empty database up, or keep the dashboard bound to loopback until you have restored or
+claimed it. Restoring a backup taken after setup brings the lock and the owner back with it.
+
+A restore that brings back `gi_users` but not `gi_system_states` is the one inconsistent case: the
+backend then creates the install **locked with no owner** and logs an `ERROR` naming
+`npm run auth:admin:dist -- transfer-owner --email <address>`, which is the fix.
 
 ---
 
@@ -794,9 +1027,26 @@ is an upsert against a unique key).
 
 | symptom | cause | fix |
 |---|---|---|
-| `backend` restarts in a loop; logs show `CONFIGURATION ERROR: SHOPIFY_PARTNER_ORG_ID is not set.` | A required value is missing or unusable. (Older notes blamed `.env.example` for carrying `PARTNER_ORGANIZATION_ID` and friends — it no longer does; those names are gone from the repository.) | Add the names from [step 3](#step-3--fill-in-six-values), then `docker compose up -d backend`. The error block lists **every** missing key at once — fix them in one pass. |
+| `backend` restarts in a loop; logs show `CONFIGURATION ERROR: SHOPIFY_PARTNER_ORG_ID is not set.` | A required value is missing or unusable. (Older notes blamed `.env.example` for carrying `PARTNER_ORGANIZATION_ID` and friends — it no longer does; those names are gone from the repository.) | Add the names from [step 3](#step-3--fill-in-the-required-values), then `docker compose up -d backend`. The error block lists **every** missing key at once — fix them in one pass. |
 | `CONFIGURATION ERROR: JWT_SECRET is set, but it is 12 characters; use at least 32` | Short secret. | `openssl rand -hex 32`. |
-| `CONFIGURATION ERROR: ADMIN_PASSWORD is set, but it is already a bcrypt hash` | Hash pasted into the plaintext variable. | Move it to `ADMIN_PASSWORD_HASH`. Hashing a hash produces a value that looks valid and matches nothing anyone can type. |
+| A banner `UPGRADING FROM A SINGLE-OPERATOR BUILD` above the `CONFIGURATION ERROR` | `ADMIN_*` are still set, and `APP_PUBLIC_URL`, `SMTP_HOST` or `SMTP_FROM` is missing or unusable. | [Upgrading from a single-operator build](#upgrading-from-a-single-operator-build), then `docker compose up -d backend`. |
+| `CONFIGURATION ERROR: SMTP_FROM is set, but it contains a display name` | `SMTP_FROM` holds `Name <address>`. | Put only the address there and the name in `SMTP_FROM_NAME`. |
+| `CONFIGURATION ERROR: SMTP_USER is set, but SMTP_PASS is not.` (or the reverse) | Half a login. | Set both, or neither for a relay that accepts mail without one. |
+| `WARN: mail: the mail server check failed`, `error_class` `EAUTH_535` (or another `EAUTH_…`), on Gmail | Gmail refused the login. Almost always one of: the Google **account** password where an **app password** belongs (boot also warns that `SMTP_PASS` is not 16 characters); 2-Step Verification is off; or the Google account password has been changed since the app password was made, which revokes every app password. | Create a new app password at <https://myaccount.google.com/apppasswords> — [`SETUP.md` § 2.3](./SETUP.md#23-outgoing-mail) — put it in `SMTP_PASS`, and `docker compose up -d backend`. `SMTP_USER` must be the same Google account. |
+| The mail check fails with `EAUTH_…` although the password is right, or compose prints `The "xyz" variable is not set. Defaulting to a blank string.` | The SMTP password contains `$`. Compose expands `$NAME` in unquoted and double-quoted `.env` values, so part of the password was replaced by an empty variable. (A `#` after a space likewise starts a comment.) | Single-quote the value — `SMTP_PASS='pa$sword'` — and `docker compose up -d backend`. |
+| The mail check fails with `ETIMEDOUT`, `ECONNECTION` or `ESOCKET`, or says the server *did not answer the boot check in time* | The backend cannot reach the mail server: a wrong host or port, a firewall, or a hosting provider that blocks outbound SMTP — many block port 25, and some block 465 and 587 on new accounts too. | Test from inside the container: `docker compose exec backend node -e "require('net').connect(465,'smtp.gmail.com').on('connect',()=>{console.log('open');process.exit(0)}).on('error',e=>{console.log(e.code);process.exit(1)}).setTimeout(8000,()=>{console.log('timeout');process.exit(1)})"`. If the port is blocked, try the other one (587 with `SMTP_SECURE` unset), ask the provider to open it, or send through a relay service on a port that is open. |
+| **Mail is down** — what still works | Signing in, and everything a signed-in person does. What stops is anything that needs an email: invitations are created but not delivered, forgot-password sends nothing, setup cannot be confirmed by email. The Users page shows a banner while the last mail check has failed; the setup page shows one too. | Fix mail, then **Resend** each waiting invitation. Meanwhile, a password reset goes through the CLI's `reset-link` and setup through `setup-link` — [Account recovery (CLI)](#account-recovery-cli). |
+| The setup email never arrives, and there is no mail warning | The spam folder, most often. Otherwise the log says why nothing was sent: `setup request for a non-permitted email` (not the `SETUP_OWNER_EMAIL` or legacy address), `setup request throttled for this address` (one a minute, three an hour per address), or `send cap reached`. The page answers identically either way, by design. | `docker compose logs backend \| grep -E 'auth: setup\|mail:'`, or skip email with the CLI's `setup-link` ([Account recovery (CLI)](#account-recovery-cli)). |
+| `POST /api/auth/setup` answers **429**: *"Too many setup requests are waiting to be confirmed"* | Ten unconfirmed setup links are live at once — a global cap, and nothing is evicted. | Use a link already sent, or wait for them to expire (`AUTH_SETUP_TOKEN_TTL_MINUTES`). The CLI's `setup-link` is not subject to the cap. |
+| Forgot-password or the setup form answers *"Too many requests. Wait a moment and try again."* | That flow's address-keyed budget is spent. With `TRUST_PROXY` unset, the whole deployment shares one budget per flow. | Wait: one request every 30 seconds is still admitted, and the window is `AUTH_PUBLIC_FLOW_RATE_LIMIT_WINDOW_MINUTES` (15). See [Reverse proxy and TLS](#reverse-proxy-and-tls) before changing `TRUST_PROXY`. |
+| A link from an email says *"This link has expired"*, *"This link has already been used"*, *"This link is not valid"* or *"This invitation was withdrawn"* | Emailed links are single-use and expire; re-sending an invitation replaces its link, and an invitation is withdrawn when its inviter is disabled or can no longer grant its role. | Setup: submit the setup form again. Invitation: ask whoever invited you to re-send it. Password reset: request another from *Forgot your password?* on the sign-in page. |
+| Links in emails open `localhost` or `backend:8080` | `APP_PUBLIC_URL` is a loopback or internal address, and links are built only from it. Boot warns about both, and the Invitations tab warns when it is loopback. | Set `APP_PUBLIC_URL` to the address people use, `docker compose up -d backend`, and re-send any outstanding invitations — a link already sent keeps the old address. |
+| The setup screen appears on an install that was already set up | The backend started against an **empty** database — after `down -v`, on a new volume, or with a different `MONGO_URI`. | See [Restore](#restore). Restore your backup; do not claim setup on a database you mean to replace. |
+| Log: `ERROR: auth: setup is locked but the owner account is missing. Run: npm run auth:admin:dist -- repair-owner …` | The owner's account row is gone (deleted by hand, or a partial restore). The Sync page raises the same warning. | `docker compose exec backend npm run auth:admin:dist -- repair-owner --email <address> --name <name>` — it recreates the owner and prints a 15-minute password-reset link. |
+| Log: `ERROR: auth: setup is locked but no owner is set. Run: npm run auth:admin:dist -- transfer-owner …` | Accounts exist but the install document did not (a partial restore), so the install was created locked with no owner. | `docker compose exec backend npm run auth:admin:dist -- transfer-owner --email <an active account>`. |
+| A full page: **"Could not load your account"**, with Retry | The backend could not read your session from the database (a `503`). You are still signed in. | Check Mongo, then press Retry. |
+| A page or a section says **"Restricted"** | Your role lacks the permission it needs. | Ask the owner or an admin — [Users, roles and permissions](#users-roles-and-permissions). |
+| Nobody can sign in: the password is forgotten and mail is not working, or the only admin is disabled | — | [Account recovery (CLI)](#account-recovery-cli): `reset-link`, or `enable`. |
 | Dashboard loads, every API call fails, browser console shows network errors | **`NEXT_PUBLIC_API_BASE_URL` points at `localhost`.** Inside the frontend container `localhost` *is* the frontend. | It must be the compose **service name**: `http://backend:8080`. Compose sets this for you — if you overrode it in `.env`, remove the override and `docker compose up -d`. The container logs `INFO: dashboard will proxy /api and /healthz to <URL>` at start, which tells you what it actually used. |
 | Frontend container exits immediately with `FATAL: NEXT_PUBLIC_API_BASE_URL must include a scheme.` | You wrote a bare hostname (`backend:8080`). | Write `http://backend:8080`. |
 | Sync page says **unreachable**: *"Nothing answered at /healthz"* | The backend is not running, or the proxy target is wrong. | `docker compose ps`, then `docker compose logs backend`. |
@@ -808,8 +1058,8 @@ is an upsert against a unique key).
 | Sync fails: *"Partner API authentication failed. Check SHOPIFY_PARTNER_API_TOKEN..."* | 401/403 from Shopify. | Re-copy the token (a trailing space is trimmed for you, so it is usually the token or the scopes). Confirm **View financials** *and* **Manage apps** are granted. |
 | Sync fails: *"Partner API endpoint returned 404. Check SHOPIFY_PARTNER_ORG_ID..."* | Wrong organisation id. | It is the number in the dashboard URL, not the app id. |
 | Sync fails: *"Partner API version ... is not supported"* | The pinned version aged out. Shopify keeps roughly the last four quarterly versions. | Set `SHOPIFY_PARTNER_API_VERSION` to a current `YYYY-MM` and `docker compose up -d backend`. |
-| **401 loop**: signed in, then bounced straight back to `/login` | (a) the 12-hour token expired; (b) `JWT_SECRET` changed, which invalidates every issued token; (c) the browser holds a token from a different install. | Sign in again. A 401 from this API always means the token was rejected — the dashboard clears it and redirects exactly once per page load, by design. If it recurs immediately after a correct password, check `JWT_SECRET` is stable across restarts (it is only stable if it is in `.env`) and clear `localStorage` key `saa.authToken`. |
-| Login always rejected, and you are sure the password is right | The operator account is **seeded once** and never rewritten. Editing `ADMIN_PASSWORD` after first boot does nothing. | See [changing the admin password](#changing-the-admin-password). Every failed login gives the same message whatever went wrong — that is deliberate; the detail is in the server log at `LOG_LEVEL=debug`. |
+| **401 loop**: signed in, then bounced straight back to `/login` | (a) the 12-hour token expired; (b) `JWT_SECRET` changed, which invalidates every issued token; (c) the browser holds a token from a different install; (d) the session was ended — you signed out elsewhere, changed or reset your password, or an admin signed you out or disabled you; (e) the first boot after upgrading from a single-operator build, which refuses every old token. | Sign in again. A 401 from this API always means the session was rejected — the dashboard clears the token and redirects exactly once per page load, by design. If it recurs immediately after a correct password, check `JWT_SECRET` is stable across restarts (it is only stable if it is in `.env`) and clear `localStorage` key `saa.authToken`. |
+| Sign-in always rejected, and you are sure the password is right | Every failed sign-in gets the same message — unknown address, wrong password and disabled account alike — deliberately, so the form cannot be used to find out who has an account. | The backend log says which: `WARN: auth: failed sign-in` carries the address and the reason. A disabled account is re-enabled by an admin (Users & roles) or with the CLI's `enable`; a forgotten password is reset from *Forgot your password?* or with the CLI's `reset-link` — [Account recovery (CLI)](#account-recovery-cli). |
 | Manual sync sits at `PENDING` for a few seconds | The runner polls every `SYNC_POLL_INTERVAL_MS` (15 s). | Wait. If it is still `PENDING` after an hour it is swept as `STUCK_TIMEOUT`, which means **no runner is alive** — check `SYNC_DISABLED` and the backend log. |
 | Sync job reads `FAILED` / `STUCK_TIMEOUT` on a long first backfill | `SYNC_STUCK_RUNNING_MS` (30 min default) elapsed while the job was still running. | Raise it and re-run — see [section 4](#if-your-first-sync-will-take-more-than-30-minutes). |
 | Sync "succeeded" but coverage did not move | A partial failure stamps nothing on purpose, so the next window cannot skip the backfill that did not happen. The message names which half failed. | Re-run the sync. |
@@ -847,6 +1097,16 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # The other endpoints that work without signing in: first-run setup, invitation
+    # acceptance, forgot-password and password reset. Throttled in the application too.
+    location ~ ^/api/auth/(setup|invites|password)(/|$) {
+        limit_req zone=authflow burst=10 nodelay;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
@@ -855,7 +1115,13 @@ server {
     }
 }
 ```
-(with `limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;` in the `http` block.)
+(with `limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;` and
+`limit_req_zone $binary_remote_addr zone=authflow:10m rate=20r/m;` in the `http` block.)
+
+The `authflow` rule is looser than `login` on purpose: the sign-in page reads `GET /api/auth/setup`
+on every visit, and the setup page reads it again a few seconds after you submit. The pages
+themselves — `/setup`, `/accept-invite`, `/reset-password` — are ordinary dashboard pages and need no
+rule of their own.
 
 Then bind the published port to loopback so the proxy is the only way in — edit
 `docker-compose.yml`:
@@ -869,11 +1135,13 @@ ports:
 Mongo runs with **no authentication configured**, which is safe only because it is reachable solely
 from the private compose network.
 
-⚠️ **Set `TRUST_PROXY` only once this nginx is in front.** The application throttles
-`POST /api/auth/login` itself (`AUTH_LOGIN_RATE_LIMIT_MAX`, default 10 failures per 15 minutes), and
-it counts against `req.ip`. Behind the dashboard's server-side proxy `req.ip` is a container address
-unless Express is told which hops to trust, so **every login attempt in the world would share one
-bucket**. With the nginx above — and *only* with it — that is fixed by:
+⚠️ **Set `TRUST_PROXY` only once this nginx is in front.** The application throttles sign-in itself
+(`AUTH_LOGIN_RATE_LIMIT_MAX`, default 10 failures per 15 minutes), and forgot-password and the setup
+request too (`AUTH_PUBLIC_FLOW_RATE_LIMIT_MAX`), and all three count against `req.ip`. Behind the
+dashboard's server-side proxy `req.ip` is a container address unless Express is told which hops to
+trust, so **every caller in the world would share one bucket per limiter**. (The limit on the
+emailed-link pages is keyed on the link's token rather than an address, so none of this applies to
+it.) With the nginx above — and *only* with it — that is fixed by:
 
 ```dotenv
 TRUST_PROXY=uniquelocal
@@ -893,62 +1161,178 @@ untouched. Remove that nginx line, or run the bare compose stack with port 3000 
 and the per-address limit stops existing. Both directions were measured against `proxy-addr`.
 
 So: **no proxy in front → leave `TRUST_PROXY` unset.** The limit is then per deployment rather than
-per address, which is the stricter direction, and the limiter's trickle (below) is what keeps that
-from being a lockout.
+per address, which is the stricter direction; the device budget and the trickle (below) are what keep
+that from locking your team out.
 
-Keep the nginx `limit_req` rule as well. The application's limiter is deliberately in-process and
-non-persistent — restarting the backend clears every block, which is the escape hatch that stops a
-single-account install from being bricked — so it is a throttle, not a perimeter.
+Keep the nginx `limit_req` rules as well. The application's limiters are deliberately in-process and
+non-persistent — restarting the backend clears every block, which is the escape hatch that guarantees
+nobody is locked out for good — so they are a throttle, not a perimeter.
 
 #### Two budgets, and why a refusal is a rate rather than a wall
 
-There is one account, no password reset and no second user, so being locked out of this login is not
-an inconvenience — it is the end of that install. Two mechanisms keep both failure directions closed:
+Everyone on the install signs in through one endpoint, and forgot-password, setup and the emailed
+links are the ways back in when that fails. A limiter that one caller could turn into a lockout for
+everybody would be worse than none. All four limiters — sign-in, forgot-password, the setup request
+and the emailed-link pages — share the same two mechanisms, each with its own budgets:
 
-- **A deployment-wide budget**, five times `AUTH_LOGIN_RATE_LIMIT_MAX`, keyed on nothing at all. It
-  is what still bites when `req.ip` is attacker-chosen (the misconfiguration above): minting a
-  thousand forwarded addresses evades the per-address tally and cannot evade this one. A single
-  operator mistyping a password meets the per-address limit long before reaching it.
-- **A trickle.** Once *any* budget is spent, one attempt every 30 seconds is admitted anyway, and a
-  correct password on any of them clears both tallies outright. So a caller who floods the shared
-  bucket cannot keep you out: you wait at most half a minute. An attacker is left with two guesses a
-  minute against bcrypt, which is not a brute force.
+- **A deployment-wide budget**, five times the per-key limit, keyed on nothing at all. It is what
+  still bites when `req.ip` is attacker-chosen (the misconfiguration above): minting a thousand
+  forwarded addresses evades the per-address tally and cannot evade this one. One person mistyping a
+  password meets the per-address limit long before reaching it.
+- **A trickle.** Once *any* budget is spent, one request every 30 seconds is admitted anyway, so a
+  spent budget is a rate, never a wall, and an attacker is left with two guesses a minute against
+  bcrypt, which is not a brute force. It admits whoever asks first, though, so on its own it does not
+  get *you* in: a caller who keeps polling takes every admission. A correct password admitted this
+  way does not clear either tally — if it did, any account holder could reset the count between
+  guesses at someone else's password.
+- **A device budget (sign-in only).** Every successful sign-in hands the browser a device token,
+  bound to the email it signed in with. The next sign-in for that email from that browser is metered
+  on the device's own budget (the same size as the per-address one) and never waits on the shared
+  ones, so the owner and every member can sign in from their usual browser however hard someone else
+  floods. The token is not a credential — it skips no password check — and it proves nothing for any
+  other account. What it does not cover: a first sign-in from a new browser, or one whose storage was
+  cleared, shares the common budget and its trickle. If that is you during a flood, sign in from a
+  browser you have used before. Restarting the backend clears every tally (they live in memory),
+  but a flood that is still running spends the fresh budget again within seconds.
+
+And the shell is always a way in: the recovery CLI below is not rate-limited and needs no mail.
 
 The trickle is deliberately *not* available at the instant a budget runs out — it is scheduled from
 when the window opened — so a burst cannot spend the budget and walk straight through the refusal.
 
-### Changing the admin password
+### Users, roles and permissions
 
-`seedAdminIfMissing` creates the operator account **only when none exists** and never rewrites one.
-Editing `ADMIN_PASSWORD` in `.env` after the first boot therefore does nothing at all. That is
-deliberate: a seeder that rewrote the hash on every boot would mean anyone who can edit `.env` can
-take over the account.
+**How people get in — exactly two ways.** First-run setup creates the **owner**, once, and then locks
+for good. An **invitation** creates everyone else. There is no public sign-up.
 
-There is no change-password endpoint in this build. To change it, delete the row and let the seeder
-run again:
+An invitation goes to one address with one role, from **Users & roles → Invitations**. The invitee
+opens the emailed link, chooses their own name and password on `/accept-invite`, and signs in. The
+link lasts `AUTH_INVITE_TTL_HOURS` (72 hours by default). **Resend** issues a fresh link — at most
+once a minute, and five sends a day per invitation counting the first — and **Revoke** kills it. One
+person can create at most 20 invitations a day. An address with an outstanding invitation cannot be
+invited again; resend the one that exists.
+
+**The built-in roles** live in code, so they cannot be edited or deleted and mean the same thing on
+every install. Their permission sets nest: Viewer ⊂ Analyst ⊂ Admin ⊂ Owner.
+
+| role | permissions | assignable |
+|---|---|---|
+| **Owner** | all 12 | **no** — exactly one person. Created by setup; moved only with the CLI's `transfer-owner`. |
+| **Admin** | all except `roles:manage` | yes |
+| **Analyst** | `apps:read`, `analytics:read`, `financials:read`, `merchants:read`, `sync:read`, `sync:run` | yes |
+| **Viewer** | `apps:read`, `analytics:read`, `financials:read`, `merchants:read` | yes |
+
+**Custom roles** are the owner's alone to make (**Users & roles → Roles**): any subset of the
+catalogue that includes `apps:read` and every chosen permission's prerequisites — the editor ticks
+those for you. `roles:manage` can never be granted, and a custom role cannot be named Owner, Admin,
+Analyst or Viewer. A role still assigned to someone, or named on an outstanding invitation, cannot be
+deleted. Each person has exactly one role.
+
+**The twelve permissions** — what each one discloses or allows. Every guarded endpoint outside
+`/api/account` names exactly one, and a request without it is answered `403` with the permission's
+key.
+
+| permission | shown as | discloses / allows | endpoints | requires |
+|---|---|---|---|---|
+| `apps:read` | View apps | App name, sync watermarks and coverage gates. Every role holds it. | `GET /api/partner-apps`, `GET /api/partner-apps/:partner_app_id`, `GET /api/meta/coverage` | — |
+| `analytics:read` | View analytics | Counts and rates: listing traffic, funnel steps, retention, time-to-paid, trial trend. No money, no store names. | `GET /api/funnel`, `/api/funnel/traffic-source`, `/api/funnel/geo`; `GET /api/conversion/funnel`, `/custom-funnel`, `/cohort-retention`, `/time-to-paid`, `/trial-trend` | `apps:read` |
+| `financials:read` | View financials | Money aggregates: cash, MRR by plan, revenue by country. No store names. | `GET /api/partner-apps/:partner_app_id/kpi`, `GET /api/conversion/plan-mix`, `GET /api/stores/countries` | `apps:read` |
+| `merchants:read` | View merchants | Anything that names a store: the roster and store detail, subscriptions, install cohorts, churn lists, revenue movers — including the Revenue and Churn tabs of the Revenue page. | `GET /api/partner-apps/:partner_app_id/events`; `GET /api/revenue/now`, `/overview`, `POST /api/revenue/shop-plans`; `GET /api/funnel/install-cohort`; `GET /api/conversion/trial-outcomes`, `/logo-churn`, `/revenue-churn`; `GET /api/stores`, `/api/stores/detail`, `/api/subscriptions` | `financials:read` |
+| `apps:manage` | Manage apps | Register, edit and deactivate the partner app. | `POST /api/partner-apps`, `PATCH`/`DELETE /api/partner-apps/:partner_app_id` | `apps:read` |
+| `sync:read` | View sync | Sync health, the job history — payloads and error stacks included — and who triggered each job. | `GET /api/sync/health`, `/api/sync/jobs`, `/api/sync/jobs/:job_id` | `apps:read` |
+| `sync:run` | Run sync | Run the Partner sync and the smoke job; cancel a pending job. | `POST /api/sync/partner`, `/api/sync/dummy`, `/api/sync/jobs/:job_id/cancel` | `sync:read` |
+| `sync:run_billed` | Run billed scans | Run BigQuery scans, which are billed to your GCP project, including the scan estimate. | `POST /api/sync/bigquery`, `/api/sync/install-attribution` | `sync:read` |
+| `users:read` | View users | Teammates (name, email, role, status, last sign-in), invitations and roles. | `GET /api/users`, `GET /api/invites`, `GET /api/roles` | `apps:read` |
+| `users:manage` | Manage users | Invite, re-send or revoke invitations; change roles; disable or enable people; sign them out everywhere; send them a password-reset email — only for roles strictly below your own. | `PATCH /api/users/:user_id/role`, `POST /api/users/:user_id/disable`, `/enable`, `/sessions/revoke`, `/password-reset`; `POST /api/invites`, `/api/invites/:invite_id/resend`, `/revoke` | `users:read` |
+| `roles:manage` | Manage roles | Create, edit and delete custom roles. **Owner only — cannot be granted.** | `POST /api/roles`, `PATCH`/`DELETE /api/roles/:role_id` | `users:read` |
+| `audit:read` | View activity log | The security activity log: sign-ins and failed sign-ins (with the address that was typed), setup, invitations, role and account changes, recovery-CLI actions — with the source address where known. | `GET /api/audit-events` | `apps:read` |
+
+Everyone signed in, whatever their role, has their own **Account** page — name, password, sign out,
+and *sign out my other sessions* (`/api/account/*`, which needs no permission beyond being signed in).
+
+The side nav shows a page when the role holds **any** permission its sections need — Overview:
+`financials:read`; Funnel: `analytics`, `financials` or `merchants`; Traffic Sources: `analytics`;
+Trial Funnel: `analytics` or `merchants`; Logo Churn, Stores, Subscriptions: `merchants`; Revenue:
+`financials` or `merchants`; Partner Apps: `apps:read`; Sync: `sync:read`; Users & roles:
+`users:read`. A section inside a page that the role cannot read shows *Restricted* in place of its
+chart; it never shows zeros.
+
+**The management rule** decides every action on a person or an invitation:
+
+- nobody acts on **themselves** through Users & roles — the Account page is for that;
+- nobody acts on the **owner** through the dashboard or the API at all — ownership moves only with the
+  CLI;
+- the owner may act on anyone else;
+- anyone else needs `users:manage`, and may act only on someone whose role is **strictly below** their
+  own (its permissions a strict subset of theirs), and may invite with or assign only such a role.
+
+So an Admin manages Analysts, Viewers and custom roles below Admin, but not another Admin. The Users
+page greys out what the rule refuses and says why.
+
+Things that follow from it, and are easy to miss:
+
+- **An invitation is only as good as its inviter.** If the inviter is disabled, or can no longer grant
+  that role — their own role changed, or the custom role was edited — the outstanding invitation is
+  withdrawn and its link stops working.
+- **A role change takes effect on the person's next request.** They are not signed out; permissions
+  are read from the database on every request. Disabling someone ends their sessions at once.
+- **There is no email change and no user deletion** — see [What is not included](#what-is-not-included).
+
+### Account recovery (CLI)
+
+For the things the dashboard cannot do for you: the only admin is disabled, a password is forgotten
+while mail is not working, the setup email never came, or the owner account is gone. It runs on the
+server, next to the backend's configuration — **shell access is the trust boundary**, which is why it
+prints links instead of emailing them.
 
 ```bash
-# 1. Put the new password in .env (ADMIN_PASSWORD, or preferably ADMIN_PASSWORD_HASH)
-# 2. Remove the existing operator account
-docker compose exec mongo mongosh --quiet shopify_app_analytics \
-  --eval 'db.gi_admin_users.deleteMany({})'
-# 3. Recreate the backend so it re-seeds
-docker compose up -d --force-recreate backend
-docker compose logs backend | grep 'SEEDED the operator account'
+docker compose exec backend npm run auth:admin:dist -- <command> [options]   # the Docker image
+cd backend && npm run auth:admin -- <command> [options]                       # a source checkout
 ```
 
-Existing sessions survive this — a token is valid for its full lifetime regardless of the account
-behind it. Rotate `JWT_SECRET` in the same change if you need those killed too.
+| command | what it does |
+|---|---|
+| `status` | Setup state and rule, the owner, the legacy operator addresses, account counts by status, and whether mail is configured. Changes nothing. |
+| `setup-link --email <e> --name <n>` | Prints a setup-confirmation link, only while setup is incomplete, under the same rule as the setup screen (`SETUP_OWNER_EMAIL`, else the legacy addresses, else anyone). A refusal names the rule and the addresses it would accept. |
+| `reset-link --email <e>` | Prints a **15-minute** password-reset link for an active account. |
+| `revoke-sessions --email <e>` or `--all` | Signs one account, or every account, out everywhere. |
+| `enable --email <e>` | Re-enables a disabled account. |
+| `transfer-owner --email <e>` | Makes an active account the owner. The previous owner keeps the role stored on their account — Admin, for the account that ran setup. Also the fix when the install has no owner at all. |
+| `repair-owner --email <e> --name <n>` | Only when setup is locked, there is no owner account (the owner pointer is empty or points at nothing), and the address is not in use: recreates the owner under that address and prints a 15-minute reset link. The departed owner's sessions are revoked and their pending invitations withdrawn first, so nothing of theirs carries over to the new account. Never reopens setup. |
 
-**For production, prefer `ADMIN_PASSWORD_HASH`.** A plaintext password in the environment is visible
-in `ps`, in shell history, in `docker inspect` and in `docker compose config`, and it stays visible
-for as long as the process runs:
+**It never takes a password.** Any option that looks like one (`--password`, `--pass…`) is refused
+before anything is read, because a password on a command line lands in shell history and the process
+list. To set a password, print a `reset-link` and open it.
+
+**Printed links are credentials.** Whoever uses one first gets the account. Each is single-use, and
+the CLI prints its expiry in UTC. Every command that changes something or prints a link is recorded
+in the security activity log as a CLI action.
+
+It needs only `MONGO_URI`, plus `APP_PUBLIC_URL` for the commands that print a link — it deliberately
+skips the full configuration check, so it still runs when a missing mail setting is what keeps the
+server down. If the backend container is restart-looping, `exec` has nothing to enter; use a one-off
+container instead:
 
 ```bash
-node -e "console.log(require('bcryptjs').hashSync(process.argv[1], 12))" 'your new password'
+docker compose run --rm backend npm run auth:admin:dist -- status
 ```
 
-The hash is stored verbatim — never re-hashed — and it wins over `ADMIN_PASSWORD` when both are set.
+Exit codes: **0** done; **1** refused or failed, or a setting it needs is missing; **2** the command
+line was wrong, and nothing was read or written.
+
+The common cases:
+
+| situation | do this |
+|---|---|
+| Forgot your password, mail works | *Forgot your password?* on the sign-in page. An admin can also send you a reset from Users & roles. |
+| Forgot your password, mail does not work | `reset-link --email you@yourcompany.com`, and open the link within 15 minutes. |
+| The setup email never arrived | `setup-link --email you@yourcompany.com --name "Your Name"`. |
+| The only admin is disabled | `enable --email …`. |
+| A session may have leaked | `revoke-sessions --email …`, or `--all` for everyone; then change the password. |
+| The owner is leaving | The owner invites the successor, who accepts; then `transfer-owner --email <successor>`. The new owner can then disable the old account. |
+| Someone's email address changes | Disable the old account and invite the new address. For the **owner**: invite the new address, accept it, `transfer-owner` to it, then disable the old account from the new one. |
+| Boot logs `setup is locked but the owner account is missing` | `repair-owner --email … --name …`, then open the printed reset link. |
+| Boot logs `setup is locked but no owner is set` | `transfer-owner --email <an active account>`. |
 
 ### Rotating `JWT_SECRET`
 
@@ -959,9 +1343,11 @@ Changing it invalidates every issued token immediately, which is exactly how you
 docker compose up -d backend
 ```
 
-Everyone is bounced to `/login` on their next request. Tokens are **stateless and cannot be revoked
-individually** — rotating the secret is the only revocation mechanism there is. That, plus the
-12-hour `AUTH_TOKEN_TTL_HOURS`, is the whole session model.
+Everyone is bounced to `/login` on their next request. This is the blunt instrument — rotate the
+secret when the secret itself may have leaked. For anything narrower there is no need: a session is a
+database row that every request re-reads, so signing out (Account page), *Sign out everywhere* on
+someone else (Users & roles), disabling a user, a password change or reset, and the CLI's
+`revoke-sessions` all end the affected sessions on their next request.
 
 ### Resource expectations
 
@@ -972,7 +1358,8 @@ individually** — rotating the secret is the only revocation mechanism there is
 - **Mongo is the one to size.** Give it 1 GB and room to grow; storage scales with the number of
   Partner events and payouts you have ever had, which grows monotonically —
   **`gi_sync_jobs` has no TTL and is never pruned**, so it grows by one row per sync forever
-  (about 365/year — small, but not zero).
+  (about 365/year — small, but not zero). `gi_audit_events` is the same for signed-in activity:
+  only rows from anonymous requests expire (after 180 days).
 - **The frontend is a static-ish Next.js standalone server.** 256 MB is plenty.
 - **One backend replica.** See below.
 
@@ -993,18 +1380,31 @@ Being explicit, because each of these is a deliberate omission rather than a mis
   so a second replica would not double-execute a job — but nothing else about this build has been
   designed or tested for horizontal scale, and it does not need it.
 - **No multi-tenancy.** `SHOPIFY_PARTNER_APP_ID` is the only scoping concept. One deployment reports
-  on one organisation's apps.
-- **No user management.** One operator account, from the environment. No signup, no password reset,
-  no second user — absences that are the security model, not gaps in it.
+  on one organisation's apps. Several people can sign in to it, each with a role; they all see the
+  same organisation.
+- **No public sign-up, no single sign-on, no multi-factor authentication.** Accounts come from
+  first-run setup and emailed invitations only, and a password is the one factor.
+- **No email change and no user deletion.** Someone whose address changes is disabled and invited
+  again at the new address; a leaver is disabled, which ends their sessions and withdraws the
+  invitations they sent. The owner's address changes the same way, plus a `transfer-owner` —
+  [Account recovery (CLI)](#account-recovery-cli).
+- **No copy-this-link fallback for email.** A link shown on screen to whoever is signed in is a link
+  handed to the wrong person the first time a screen is shared. Someone with shell access can print
+  one with the recovery CLI.
 - **No keyword rankings, competitor tracking or LLM briefings.** These three appear on the Sync page
   so the gap is visible, and are refused by name if you try to run one — there is no handler for any
   of them on the server. (The listing-analytics tier **is** built; see
   [Tier 2](#tier-2--the-listing-analytics-tier-optional-and-fully-built). Leave it unconfigured and
   Traffic Sources and the upper conversion funnel report that they have no data rather than showing
   zeros.)
-- **No audit log** beyond the application's own log output. (Login rate limiting **is** built — see
-  `AUTH_LOGIN_RATE_LIMIT_MAX` in [section 3](#tier-3--tunables) — but read the `TRUST_PROXY` row
-  beside it: without that set correctly the limit counts the proxy's address, not the caller's.)
+- **No general audit log.** The *security* activity log **is** built — sign-ins, invitations, role
+  and account changes, recovery-CLI actions (Users & roles → Activity, `audit:read`) — but syncs
+  and partner-app edits are recorded in the job ledger and the application log, not there.
+- **No shared rate-limit or mail-cap state.** The limiters and the email caps live in the backend
+  process's memory: a restart clears them, and a second replica would have its own. (Rate limiting
+  **is** built — see `AUTH_LOGIN_RATE_LIMIT_MAX` in [section 3](#tier-3--tunables) — but read the
+  `TRUST_PROXY` row beside it: without that set correctly the address-keyed limits count the proxy's
+  address, not the caller's.)
 
 ---
 

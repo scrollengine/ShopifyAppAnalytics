@@ -165,8 +165,13 @@ const _WARNINGS = Object.freeze({
     noPartnerApp: 'No partner app is registered, so there is nothing for any sync to run against. Set '
         + 'SHOPIFY_PARTNER_APP_ID and restart, or POST /api/partner-apps — no restart needed for that one.',
 
-    noOperatorAccount: 'No operator account exists, so nobody can sign in to this deployment. Set '
-        + 'ADMIN_EMAIL and ADMIN_PASSWORD and restart; the account is created at boot.',
+    //  Names the CLI because nothing in the dashboard can fix it: only the owner can manage custom
+    // roles, and setup never reopens. Decided by the owner POINTER, so the legacy single-operator
+    // rows can never satisfy it the way they satisfied the ADMIN_* check this replaced.
+    ownerMissing: 'Setup is locked but the owner account is missing, so nobody can create or edit custom roles '
+        + 'and setup will not reopen to fix it. On the server, run: npm run auth:admin:dist -- repair-owner '
+        + '--email <address> --name <name> — it recreates the owner and prints a password-reset link. To make an '
+        + 'existing active account the owner instead, run: npm run auth:admin:dist -- transfer-owner --email <address>',
 
     neverRunAnything: 'No background job has ever been recorded here. Nothing has been triggered, by an '
         + 'operator or by the schedule, so every collection below is empty for that reason rather than '
@@ -268,13 +273,13 @@ const getSyncHealth = ({ user_id }: IdentityObject, {}: NoDomainParamsInput): Pr
             const asOf = new Date();
             const warnings: string[] = [];
 
-            // Three independent reads of independent collections. Concurrent because a health screen
-            // is reloaded by someone who is already worried, and three sequential round trips is
-            // three latencies they wait through.
-            const [rowCounts, appRows, jobHealth] = await Promise.all([
+            // Four independent reads. Concurrent because a health screen is reloaded by someone who
+            // is already worried, and four sequential round trips is four latencies they wait through.
+            const [rowCounts, appRows, jobHealth, authFacts] = await Promise.all([
                 syncHealthRepository.countAllCollections(),
                 syncHealthRepository.findPartnerAppHealthRows(),
-                syncHealthRepository.aggregateSyncJobHealth()
+                syncHealthRepository.aggregateSyncJobHealth(),
+                syncHealthRepository.readAuthHealthFacts()
             ]);
 
             const listingTierConnected = Boolean(config.BIGQUERY.ENABLED);
@@ -291,7 +296,7 @@ const getSyncHealth = ({ user_id }: IdentityObject, {}: NoDomainParamsInput): Pr
                 last_install_attrib_synced_at: _newestWatermark(appRows.map((row: PartnerAppHealthRow) => row.last_install_attrib_synced_at))
             };
 
-            // ── B. The nine collections ─────────────────────────────────────
+            // ── B. The sixteen collections ──────────────────────────────────
             const collections: CollectionHealth[] = HEALTH_COLLECTIONS.map((entry) => {
                 //  `|| 0` covers a registry entry the repository does not count. It cannot happen
                 // — `test/syncJobs.test.js` asserts the two agree, in both directions — but the
@@ -464,8 +469,8 @@ const getSyncHealth = ({ user_id }: IdentityObject, {}: NoDomainParamsInput): Pr
             if (rowCounts.partner_apps === 0) {
                 warnings.push(_WARNINGS.noPartnerApp);
             }
-            if (rowCounts.admin_users === 0) {
-                warnings.push(_WARNINGS.noOperatorAccount);
+            if (authFacts.owner_missing) {
+                warnings.push(_WARNINGS.ownerMissing);
             }
             if (rowCounts.sync_jobs === 0) {
                 warnings.push(_WARNINGS.neverRunAnything);

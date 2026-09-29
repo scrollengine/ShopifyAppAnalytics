@@ -194,8 +194,9 @@ jobs:
             #
             #  test/routeGuard.test.js is the one that matters most: it walks the
             #  live Express stack and fails on any /api/* route reachable without
-            #  `verifyAdmin`. Until this workflow existed, nothing ran it unless
-            #  a human remembered to.
+            #  `authenticate`. Until this workflow existed, nothing ran it unless
+            #  a human remembered to. test/permissionMap.test.js is its partner:
+            #  it pins the one permission every guarded route requires.
             # =================================================================
             - name: Test
               if: ${{ !cancelled() && steps.install.outcome == 'success' }}

@@ -18,8 +18,12 @@ npm install
 npm run dev                    # http://localhost:3000
 ```
 
-Sign in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from the **backend's** `.env`. There is no signup
-and no user table — one operator account, configured where the data is.
+On a fresh backend the dashboard sends you to **`/setup`**: enter your email and name, follow the
+confirmation link that arrives by email, and choose a password. That creates the **owner** account and
+locks setup for good; everyone else joins by invitation from **Users & roles**. There is no public
+sign-up. (The backend needs a mail server for this — see [`../SETUP.md`](../SETUP.md) § 2.3 — and its
+`APP_PUBLIC_URL` must be the address you open the dashboard at, `http://localhost:3000` here, because
+the emailed links are built from it.)
 
 | Script | |
 |---|---|
@@ -43,29 +47,47 @@ origin. Every request the dashboard makes is to a relative path, so the browser 
 one origin — which is why there is no CORS configuration anywhere in this project, in dev or in
 production. Restart the dev server after changing it; a rewrite is not hot-reloaded.
 
-Nothing else is configurable here on purpose. The Partner API token, the app id and the admin
-credentials all live in the backend's `.env`, in one place, where the sync that uses them runs.
+Nothing else is configurable here on purpose. The Partner API token, the app id and the mail
+settings all live in the backend's `.env`, in one place, where the code that uses them runs. There are
+no credentials here at all: accounts live in the backend's database.
 
 ---
 
 ## How it authenticates
 
-`POST /api/auth/login` issues a bearer JWT; every other call sends it as
+`POST /api/auth/login` issues a bearer token for a session; every other call sends it as
 `Authorization: Bearer <token>`. The token lives in `localStorage` (`utils/auth.js`) rather than a
 cookie — an Authorization header is never attached to a cross-site request automatically, so this
-API is not CSRF-exposed the way a cookie-authenticated one would be.
+API is not CSRF-exposed the way a cookie-authenticated one would be. Sign-in also returns a *device
+token*, kept under its own key and sent with the next sign-in: it is not a credential, only proof
+that this browser signed in to that account before, which gives that sign-in a rate-limit budget no
+one else can spend. Signing out leaves it in place on purpose.
 
-Two independent checks, and both are needed:
+**Public pages** — `/login`, `/setup`, `/setup/verify`, `/accept-invite`, `/forgot-password`,
+`/reset-password` — are listed once in `utils/publicRoutes.js` and render without a session. The
+token pages read the emailed link's token from the URL **fragment** (`#token=…`), remove it from the
+address bar at once, and send it only when you press the button, so a mail scanner that opens the
+link cannot use it up.
+
+Everything else passes four checks:
 
 - **`pages/_app.js`** blocks a protected page from mounting when no token is stored, so a signed-out
   visitor never fires a request that is certain to 401.
-- **`API_Services/apiClient.js`** watches for a real 401 — a token that exists but has *expired*
-  only fails at the API — clears it, and redirects to `/login`. It deliberately does **not** redirect
-  on a 401 from the login call itself; that one means "wrong password", and reloading the page would
-  destroy the form before the operator could read the error.
+- **`contexts/sessionContext.js`** loads `GET /api/account` — who you are, your role, your
+  permissions — and nothing renders until it has. If it cannot load, the page says so and offers
+  Retry; it never guesses "no permissions" and never signs you out.
+- **`utils/permissions.js`** decides which pages the role can open (`PAGE_PERMISSIONS`, default-deny)
+  and filters the nav to match. A page the role cannot open shows *Restricted* without mounting.
+- **`API_Services/apiClient.js`** watches for a real 401 — a session that has *ended* only fails at
+  the API — clears the token, and redirects to `/login`, but only when the token that failed is
+  still the stored one: a password change or "sign out my other sessions" in another tab stores a
+  fresh token, and an in-flight request's 401 for the old one must not delete it. It deliberately
+  does **not** do any of that for a 401 from `/api/auth/*`: from sign-in it means "wrong password",
+  and reloading the page would destroy the form before anyone could read the error. A 403 is passed through to the page, which shows
+  *Restricted — your role does not include …* in place of that section.
 
-Neither is a security boundary. No data lives in this app; every figure comes from a call the backend
-authenticates for itself.
+None of these is a security boundary. No data lives in this app; every figure comes from a call the
+backend authenticates and authorises for itself.
 
 ---
 
@@ -96,11 +118,13 @@ data.
 
 ```
 pages/            _app.js (providers + auth gate), _document.js, and the screens
-contexts/         loaderContext (toast/loader), growthIntelContext (partner-app selection)
+contexts/         sessionContext (the signed-in account and its permissions),
+                  loaderContext (toast/loader), growthIntelContext (partner-app selection)
 components/       Polaris + Recharts building blocks
 API_Services/     one axios provider + a service class per domain
-utils/            the auth-token helpers, the ten dashboard route paths, and the
-                  Revenue tab vocabulary those paths carry in a query string
+utils/            the auth-token helpers, the public routes, the permission map, the ten
+                  dashboard route paths plus the admin ones, and the tab vocabulary
+                  (Revenue, Users & roles) those paths carry in a query string
 public/css/       the two hand-written stylesheets — everything else is Polaris
 styles/           global reset
 ```

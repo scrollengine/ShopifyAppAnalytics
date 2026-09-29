@@ -54,18 +54,41 @@ import AxiosClientProvider from '../apiClient';
  */
 const resourceNotAllowed = { resource_access: 'NOT_ALLOWED' };
 
+/**
+ * The API's own 403 envelope, when that is what `err` carries.
+ *
+ * Forwarded INTACT rather than flattened to `{}`: its `error: { code: 'FORBIDDEN', permission }` is
+ * what lets `readDataState` say "Restricted — your role does not include …". Flattened, a role that
+ * lacks the permission would read "This could not be loaded" — a failure nobody can fix from a log,
+ * reported in place of the access the reader actually lacks.
+ *
+ * @param {Object} err - The axios error.
+ * @returns {Object|null} The envelope, or null when this is not a 403 with a body.
+ */
+const _forbiddenEnvelope = (err) => {
+    if (!err || !err.response || err.response.status !== 403) {
+        return null;
+    }
+    const body = err.response.data;
+    if (!body || typeof body !== 'object') {
+        return null;
+    }
+    return body;
+};
+
 class GrowthIntelCountryApiService {
     constructor() {
         this.apiClient = new AxiosClientProvider().getClient();
     }
 
     /**
-     * Shared GET. Mirrors `conversionService._get` exactly — same envelope, same 401 sentinel, same
-     * `{}` on failure — so `readDataState` decodes every service in this folder identically.
+     * Shared GET. Mirrors `conversionService._get` exactly — same envelope, same 401 sentinel, the
+     * 403 envelope passed through, `{}` on any other failure — so `readDataState` decodes every
+     * service in this folder identically.
      *
      * @param {String} path - Path relative to the axios base (`/api/`), e.g. 'stores/countries'.
      * @param {Object} params - Query parameters.
-     * @param {Function} cb - Receives the response envelope, `{}`, or `resourceNotAllowed`.
+     * @param {Function} cb - Receives the response envelope, the 403 envelope, `{}`, or `resourceNotAllowed`.
      * @param {String} ctx - Method name, for the console line on failure.
      * @returns {void}
      */
@@ -75,6 +98,8 @@ class GrowthIntelCountryApiService {
             .then((response) => { cb(response && response.data ? response.data : {}); })
             .catch((err) => {
                 if (err.response && err.response.status === 401) { cb(resourceNotAllowed); return; }
+                const forbidden = _forbiddenEnvelope(err);
+                if (forbidden) { cb(forbidden); return; }
                 console.log(`GrowthIntel country.${ctx} error`, err);
                 cb({});
             });

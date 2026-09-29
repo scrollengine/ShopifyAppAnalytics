@@ -41,7 +41,7 @@ export interface CollectionStateVerdict {
 // ── Repository shapes ───────────────────────────────────────────────────────
 
 /**
- * Exact row counts for the nine collections, keyed by the registry's `key`.
+ * Exact row counts for the sixteen collections, keyed by the registry's `key`.
  *
  *  EXACT, from `countDocuments`, never `estimatedDocumentCount`. The estimate reads collection
  * metadata, which can be stale after an unclean shutdown — and the single distinction this endpoint
@@ -49,6 +49,18 @@ export interface CollectionStateVerdict {
  * would report a working sync as one that has never run.
  */
 export type CollectionRowCounts = Record<string, number>;
+
+/**
+ * Account facts the health screen needs that no row count can show.
+ *
+ * ⚠️ One boolean on purpose. Read through the models chokepoint rather than `modules/auth`, so the
+ * derivation of who the owner is stays the auth module's alone; this only asks whether the pointer's
+ * target exists.
+ */
+export interface AuthHealthFacts {
+    /** Setup is locked but `owner_user_id` is null or names no `gi_users` row. */
+    owner_missing: boolean;
+}
 
 /** The watermark and coverage fields the health read needs off one partner-app row. */
 export interface PartnerAppHealthRow {
@@ -201,7 +213,7 @@ export interface SyncHealthResponse {
      * What is actually armed is `schedules[].scheduled`, which is read from live timers.
      */
     runner: SyncRunnerConfig;
-    /** Exactly the nine collections this build registers. Never a tenth. */
+    /** Exactly the sixteen collections this build registers. Never a seventeenth. */
     collections: CollectionHealth[];
     /**
      * Newest SUCCESS per job type, `null` for a type that has never succeeded.

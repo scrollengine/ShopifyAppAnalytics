@@ -5,8 +5,9 @@
  *    THE ROUTE GUARD TEST — the most important test in this repository
  * ============================================================================
  *
- *  Asserts that every `/api/*` endpoint is behind `verifyAdmin`, and that the
- *  ONLY endpoints reachable without a token are the two named in ALLOWLIST.
+ *  Asserts that every `/api/*` endpoint is behind `authenticate`, and that the
+ *  ONLY endpoints reachable without a token are the ones named in ALLOWLIST.
+ *  (WHICH permission each guarded route demands is test/permissionMap.test.js.)
  *
  *  ── The incident this exists to prevent ─────────────────────────────────────
  *  A shape worth recognising: authentication for an entire analytics API resting
@@ -26,8 +27,8 @@
  *  here instead, two independent ways:
  *
  *    1. STRUCTURALLY — the router tree is walked and each route's middleware
- *       chain is inspected for `verifyAdmin`. This catches a route that is
- *       mounted on the wrong parent, and it catches `verifyAdmin` being moved
+ *       chain is inspected for `authenticate`. This catches a route that is
+ *       mounted on the wrong parent, and it catches `authenticate` being moved
  *       BELOW a mount that used to sit under it (a reordering that reads as
  *       cosmetic and is an authentication bypass).
  *
@@ -55,8 +56,9 @@
 // ── Environment, set BEFORE anything is required ────────────────────────────
 // `src/config` snapshots `process.env` at first require, and requiring the
 // routes reaches it. Silencing the logger here keeps the test output readable;
-// the short buffer timeout stops the two public endpoints from waiting out
-// mongoose's 10s default when they query a database this test never connects.
+// the short buffer timeout stops the public endpoints that DO read (GET
+// /healthz, GET /api/auth/setup) from waiting out mongoose's 10s default when
+// they query a database this test never connects.
 process.env.LOG_LEVEL = 'silent';
 
 const test = require('node:test');
@@ -74,24 +76,37 @@ const ROUTES_ENTRY = path.join(BACKEND_ROOT, 'src', 'routes');
 const APP_ENTRY = path.join(BACKEND_ROOT, 'src', 'apps', 'app.ts');
 
 /**
- *  THE ALLOWLIST. Every endpoint reachable without a credential, and nothing else.
+ *  THE ALLOWLIST. Every endpoint reachable without a credential, and nothing else (spec §8).
  *
  * `GET /healthz`      — a readiness probe cannot present a credential, and the endpoint is
  *                       deliberately uninformative: a state and a reason, no app name, no counts,
  *                       no revenue, not even a sync timestamp.
  * `POST /api/auth/login` — where a credential comes from. It cannot require one.
+ * `GET|POST /api/auth/setup`, `/setup/inspect`, `/setup/complete` — first-run setup: there is no
+ *                       account yet to present. Locked for good (409) once setup completes.
+ * `POST /api/auth/invites/inspect|accept` — the invitee has no account until accept succeeds; the
+ *                       credential is the 256-bit link token in the body.
+ * `POST /api/auth/password/forgot|reset` — the caller has lost the credential by definition.
  *
- * Anything else on this list is a published analytics endpoint. There is no third entry that is
+ * Anything else on this list is a published analytics endpoint. There is no entry that is
  * "obviously fine": a `/whoami`, a `/refresh` and a `/logout` all take a token and therefore belong
- * behind the guard like everything else.
+ * behind the guard like everything else (logout lives at /api/account/logout, guarded).
  */
 const ALLOWLIST = [
     'GET /healthz',
-    'POST /api/auth/login'
+    'POST /api/auth/login',
+    'GET /api/auth/setup',
+    'POST /api/auth/setup',
+    'POST /api/auth/setup/inspect',
+    'POST /api/auth/setup/complete',
+    'POST /api/auth/invites/inspect',
+    'POST /api/auth/invites/accept',
+    'POST /api/auth/password/forgot',
+    'POST /api/auth/password/reset'
 ];
 
 /** The middleware whose presence in a chain constitutes "guarded". Matched by function name. */
-const GUARD_NAME = 'verifyAdmin';
+const GUARD_NAME = 'authenticate';
 
 /** How long mongoose buffers a query before rejecting, while this test holds no connection. */
 const TEST_BUFFER_TIMEOUT_MS = 400;
@@ -120,7 +135,7 @@ const ROUTE_MAP = buildRouteMap({
 const _signature = (route) => `${route.method} ${route.path}`;
 
 /**
- * True when `verifyAdmin` appears anywhere a request to this route must pass through.
+ * True when `authenticate` appears anywhere a request to this route must pass through.
  *
  * Both chains count: guards inherited from a parent mount, and middleware attached to the route
  * itself. This project applies the guard once at the mount, but a per-route guard would be equally
@@ -203,7 +218,7 @@ test('the route map is populated — this suite is not vacuously passing', () =>
     const guardedCount = ROUTE_MAP.routes.filter(_isGuarded).length;
     assert.ok(
         guardedCount > 0,
-        'No route anywhere carries verifyAdmin. The guard is either unmounted or renamed, and the '
+        'No route anywhere carries authenticate. The guard is either unmounted or renamed, and the '
         + 'structural assertion below would pass over an entirely unauthenticated API.'
     );
 });
@@ -213,7 +228,7 @@ test('the route map is populated — this suite is not vacuously passing', () =>
  *  1. STRUCTURAL — the guard is in the chain
  * ========================================================================== */
 
-test(' every /api/* route is behind verifyAdmin', () => {
+test(' every /api/* route is behind authenticate', () => {
     const unguarded = ROUTE_MAP.routes
         .filter((route) => route.path.startsWith('/api'))
         .filter((route) => !ALLOWLIST.includes(_signature(route)))
@@ -241,10 +256,10 @@ test(' the set of unguarded routes is EXACTLY the allowlist', () => {
     );
 });
 
-test('verifyAdmin is the FIRST layer of the guarded sub-router, not a later one', () => {
+test('authenticate is the FIRST layer of the guarded sub-router, not a later one', () => {
     // Express runs layers in registration order, so a guard registered after a mount does not
-    // protect it. Every guarded route must therefore see verifyAdmin at the head of its chain: if
-    // some other middleware precedes it, that middleware can respond first — and if verifyAdmin
+    // protect it. Every guarded route must therefore see authenticate at the head of its chain: if
+    // some other middleware precedes it, that middleware can respond first — and if authenticate
     // slid below a mount, the route stops being guarded at all and the tests above catch it.
     const misordered = ROUTE_MAP.routes
         .filter(_isGuarded)
@@ -253,7 +268,7 @@ test('verifyAdmin is the FIRST layer of the guarded sub-router, not a later one'
     assert.deepEqual(
         misordered.map(describeRoute),
         [],
-        'A middleware runs BEFORE verifyAdmin on the routes above. Anything ahead of the guard sees '
+        'A middleware runs BEFORE authenticate on the routes above. Anything ahead of the guard sees '
         + 'unauthenticated requests and can answer them.'
     );
 });
@@ -286,7 +301,7 @@ test(' every guarded route answers 401 to a request with no token', async () => 
             // The handler must not have run at all. Every controller here answers with a payload;
             // the guard answers with an empty `data` and an authentication message. An empty data
             // object alone would be weak evidence, so the message is checked too — only
-            // `unauthorizedResponse` called from verifyAdmin produces this pair.
+            // `unauthorizedResponse` called from authenticate produces this pair.
             const reachedHandler = Object.keys(body.data || {}).length > 0;
             if (reachedHandler) {
                 failures.push(`${route.method} ${concrete} returned 401 but carried handler data — the handler ran`);
@@ -305,7 +320,7 @@ test(' every guarded route answers 401 to a request with no token', async () => 
 test('the allowlisted routes really are reachable without a token', async () => {
     // The counterweight to the test above. If every path in the application answered 401 — because
     // the app failed to build, or a catch-all guard swallowed everything — the guard assertions
-    // would pass while proving nothing. These two must NOT be 401.
+    // would pass while proving nothing. None of these may be 401.
     const server = await _startServer();
     const results = [];
 
@@ -328,6 +343,66 @@ test('the allowlisted routes really are reachable without a token', async () => 
             + 'assertions in this file are vacuous.'
         );
     }
+});
+
+test('every public POST answers a {} body with 400, never touches the database, and is never cached', async () => {
+    // Spec §8: a public endpoint validates SHAPE before it reads anything. An anonymous probe with an
+    // empty body therefore costs no query — and a public token endpoint never answers 401, because
+    // the dashboard signs out on a 401.
+    //
+    // "No database" is observed, not inferred from timing: with no connection, mongoose BUFFERS every
+    // operation and announces it with a 'buffer' event on the connection. Any event during the probe
+    // is a query issued before the shape check.
+    const buffered = [];
+    const _onBuffer = (event) => buffered.push(`${event.collectionName}.${event.method}`);
+    mongoose.connection.on('buffer', _onBuffer);
+
+    const server = await _startServer();
+    const failures = [];
+    try {
+        for (const signature of ALLOWLIST) {
+            const [method, routePath] = signature.split(' ');
+            if (method !== 'POST') {
+                continue;
+            }
+            buffered.length = 0;
+            const response = await fetch(`${server.baseUrl}${routePath}`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: '{}'
+            });
+            let body = {};
+            try {
+                body = await response.json();
+            } catch (error) {
+                body = {};
+            }
+            if (response.status !== 400) {
+                failures.push(`${signature} answered ${response.status} to {}, expected 400`);
+            }
+            if (body.status !== false) {
+                failures.push(`${signature} answered {} without the { status: false } envelope`);
+            }
+            if (buffered.length > 0) {
+                failures.push(`${signature} queried the database before validating its body: ${buffered.join(', ')}`);
+            }
+            if (routePath !== '/api/auth/login' && !/no-store/.test(String(response.headers.get('cache-control')))) {
+                failures.push(`${signature} did not send Cache-Control: no-store`);
+            }
+        }
+
+        // Non-vacuity: the detector must SEE a query when one happens. GET /api/auth/setup reads the
+        // install document, so it must buffer at least one operation — if it does not, the 'buffer'
+        // event is not firing and the "no database" assertions above prove nothing.
+        buffered.length = 0;
+        await _requestAnonymously(server.baseUrl, 'GET', '/api/auth/setup');
+        assert.ok(buffered.length > 0, 'GET /api/auth/setup buffered no query, so the no-database detector is blind.');
+    } finally {
+        mongoose.connection.off('buffer', _onBuffer);
+        await server.close();
+    }
+
+    assert.deepEqual(failures, [], 'A public endpoint does work before it validates its input:');
 });
 
 test('an unknown path under the public /api/auth prefix fails CLOSED with 401', async () => {
@@ -373,18 +448,21 @@ test(' src/apps/app.ts mounts the routes module and nothing else', () => {
     // ── Why the two security mounts are in this list ────────────────────────────────────────
     //
     // This assertion fired when they were added, which is exactly its job, and each was reviewed
-    // against ONE question: can it ADMIT a request that `verifyAdmin` would refuse? Neither can.
+    // against ONE question: can it ADMIT a request that `authenticate` would refuse? Neither can.
     //
     //   securityHeaders  — helmet. Sets response headers and always calls next(). It has no
     //                      res.send/res.status path at all, so it cannot answer a request, only
     //                      decorate the answer something else gives.
     //   LOGIN_RATE_LIMIT_PATH — the head captured here is the PATH argument of
-    //                      `app.use(LOGIN_RATE_LIMIT_PATH, loginRateLimit)`. That path is
-    //                      '/api/auth/login', which is already one of the two entries in
+    //                      `app.use(LOGIN_RATE_LIMIT_PATH, loginBodyParser, loginRateLimit)`. That
+    //                      path is '/api/auth/login', which is already an entry in
     //                      ALLOWLIST above — this mount narrows an endpoint that is public by
-    //                      design; it does not publish a new one. The handler either calls next()
-    //                      or refuses with 429. A middleware that can only REFUSE cannot widen the
-    //                      authenticated surface.
+    //                      design; it does not publish a new one. `loginBodyParser` is
+    //                      `express.json` at 8 KB: it calls next() or fails the request into the
+    //                      terminal error handler (4xx). `loginRateLimit` calls next() or refuses
+    //                      with 429. Neither can write a success, so neither can widen the
+    //                      authenticated surface. Because only the HEAD is captured, the test
+    //                      below pins this mount's FULL argument list separately.
     //   terminalErrorHandler — a FOUR-ARGUMENT error handler, which Express reaches only when
     //                      something already threw, and only from BELOW the router. It never calls
     //                      next(), never writes a 2xx, and the only bodies it can produce are
@@ -404,5 +482,16 @@ test(' src/apps/app.ts mounts the routes module and nothing else', () => {
         + 'exported by src/routes; anything else mounted on the app is unexamined and may be '
         + 'unauthenticated. Move it under src/routes, or extend this suite to cover it — and read '
         + 'the "cannot admit" note above before editing this array.'
+    );
+
+    // The head capture above cannot see a middleware added as a LATER argument of a mount, so the
+    // one multi-argument mount is pinned whole.
+    const loginMounts = [...withoutComments.matchAll(/app\.use\(\s*LOGIN_RATE_LIMIT_PATH\s*,([^)]*)\)/g)]
+        .map((match) => match[1].split(',').map((arg) => arg.trim()).filter(Boolean));
+    assert.deepEqual(
+        loginMounts,
+        [['loginBodyParser', 'loginRateLimit']],
+        'The login-path mount in src/apps/app.ts changed its middleware list. Each entry must satisfy '
+        + 'the "cannot admit" note above; update this list only after making that argument.'
     );
 });

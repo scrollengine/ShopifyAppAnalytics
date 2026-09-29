@@ -8,13 +8,15 @@
  *  The Subscriptions page's list: every merchant on a paid plan RIGHT NOW, with their plan, status
  *  and spend.
  *
- *  Handlers are mounted BARE here. The guard is applied ONCE, on the parent sub-router in
- *  `src/routes/index.ts`, and this file inherits it by being mounted there — see that file's header
- *  for why the guard lives in one place rather than being repeated per route file.
+ *  AUTHENTICATION is applied ONCE, on the parent sub-router in `src/routes/index.ts`, and this file
+ *  inherits it by being mounted there — see that file's header for why the guard lives in one place
+ *  rather than being repeated per route file. AUTHORISATION is per route: each line below declares
+ *  its ONE permission as its first route-level middleware (spec §4).
+ *  The list names stores, so it is `merchants:read`.
  *
  *  ⚠️ MOUNTING THIS ONE NEEDS A LINE IN `routes/index.ts`. `/api/subscriptions` is a NEW area,
  *  exactly as `/api/stores` and `/api/conversion` were. `test/routeGuard.test.js` walks the live
- *  Express stack and fails on any route reachable without `verifyAdmin`, so the mount is asserted
+ *  Express stack and fails on any route reachable without `authenticate`, so the mount is asserted
  *  rather than assumed the moment it is added.
  *
  *  ──  THERE IS NO `/api/subscriptions/detail`, AND THERE MUST NOT BE ONE ──────────────────
@@ -37,8 +39,12 @@
 
 import { Router } from 'express';
 import subscriptionController = require('../controllers/subscription.controller');
+import requirePermissionMiddleware = require('../middlewares/requirePermission');
+import authModule = require('../modules/auth');
 
 const { _getSubscriptions } = subscriptionController;
+const { requirePermission } = requirePermissionMiddleware;
+const { PERMISSIONS } = authModule;
 
 const router = Router();
 
@@ -46,6 +52,6 @@ const router = Router();
 // `items: []` and a populated `population` / `data_state` / `warnings[]` when nothing has synced, no
 // payout has ever been fetched, or BigQuery is unconfigured — deliberately NOT a refusal, which the
 // page renders as though the operator had no paying customers at all.
-router.get('/', _getSubscriptions);
+router.get('/', requirePermission(PERMISSIONS.MERCHANTS_READ), _getSubscriptions);
 
 export = router;

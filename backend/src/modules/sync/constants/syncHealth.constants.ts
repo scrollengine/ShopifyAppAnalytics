@@ -2,10 +2,10 @@
 
 /**
  * ============================================================================
- *  SYNC HEALTH — the nine collections, and what an empty one means
+ *  SYNC HEALTH — the sixteen collections, and what an empty one means
  * ============================================================================
  *
- *  ──  NINE. NOT TWELVE, NOT WHATEVER THE SOURCE DASHBOARD HAD ──────────────
+ *  ──  SIXTEEN, BECAUSE THE MODEL REGISTRY HAS SIXTEEN ──────────────────────
  *
  *  This registry lists EXACTLY the collections `src/models/index.ts` registers,
  *  and `test/syncJobs.test.js` asserts that correspondence in both directions.
@@ -73,7 +73,7 @@ const HEALTH_COLLECTION_STATES = Object.freeze({
 });
 
 /**
- * The nine collections this build has, each with the watermark that governs its emptiness.
+ * The sixteen collections this build has, each with the watermark that governs its emptiness.
  *
  * `watermark` names a field on the partner-app row, or `''` when no watermark governs the collection
  * — which is itself a statement, and the state resolver branches on it rather than guessing.
@@ -155,13 +155,73 @@ const HEALTH_COLLECTIONS = Object.freeze([
         watermark: '',
         holds: 'every background run this deployment has made. This collection IS the queue, not a log of one'
     },
+    //  THE ACCOUNT COLLECTIONS. None is filled by a sync, so none has a watermark. Only the two
+    // that boot and setup write are CONFIG, where empty reads "a setup step not taken"; the rest are
+    // SYSTEM, where empty is this application's own measurement ("nothing asked of it yet"). An
+    // empty `gi_roles` is the normal case, not a missing step: the built-in roles live in code.
+    {
+        key: 'system_state',
+        collection: 'gi_system_states',
+        label: 'Install state',
+        tier: HEALTH_COLLECTION_TIERS.CONFIG,
+        watermark: '',
+        holds: 'the one install document: whether first-run setup has completed, and which account is the owner'
+    },
+    {
+        key: 'users',
+        collection: 'gi_users',
+        label: 'User accounts',
+        tier: HEALTH_COLLECTION_TIERS.CONFIG,
+        watermark: '',
+        holds: 'people who can sign in; empty until setup completes'
+    },
+    {
+        key: 'roles',
+        collection: 'gi_roles',
+        label: 'Custom roles',
+        tier: HEALTH_COLLECTION_TIERS.SYSTEM,
+        watermark: '',
+        holds: 'roles the owner created; built-in roles live in code, so empty is normal'
+    },
+    {
+        key: 'invites',
+        collection: 'gi_invites',
+        label: 'Invitations',
+        tier: HEALTH_COLLECTION_TIERS.SYSTEM,
+        watermark: '',
+        holds: 'emailed invitations, whatever became of them — pending, accepted, expired or revoked'
+    },
+    {
+        key: 'auth_tokens',
+        collection: 'gi_auth_tokens',
+        label: 'Email-link tokens',
+        tier: HEALTH_COLLECTION_TIERS.SYSTEM,
+        watermark: '',
+        holds: 'single-use setup-verification and password-reset links, stored only as hashes and removed a week after they expire'
+    },
+    {
+        key: 'auth_sessions',
+        collection: 'gi_auth_sessions',
+        label: 'Sign-in sessions',
+        tier: HEALTH_COLLECTION_TIERS.SYSTEM,
+        watermark: '',
+        holds: 'one row per sign-in, re-read on every request and removed once it expires'
+    },
+    {
+        key: 'audit_events',
+        collection: 'gi_audit_events',
+        label: 'Security activity log',
+        tier: HEALTH_COLLECTION_TIERS.SYSTEM,
+        watermark: '',
+        holds: 'who did what to which account; append-only, and only the anonymous rows expire (after 180 days)'
+    },
     {
         key: 'admin_users',
         collection: 'gi_admin_users',
-        label: 'Operator accounts',
-        tier: HEALTH_COLLECTION_TIERS.CONFIG,
+        label: 'Legacy operator accounts',
+        tier: HEALTH_COLLECTION_TIERS.SYSTEM,
         watermark: '',
-        holds: 'the accounts that may sign in to this deployment'
+        holds: 'accounts from the single-operator build: never read by sign-in, kept for provenance'
     }
 ]);
 

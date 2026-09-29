@@ -13,7 +13,7 @@ just how to run it.
 ```bash
 cd backend
 npm install
-cp .env.example .env      # then fill in the seven TIER 1 values
+cp .env.example .env      # then fill in the TIER 1 values (incl. APP_PUBLIC_URL and SMTP_*)
 npm start
 curl localhost:8080/healthz
 ```
@@ -31,11 +31,12 @@ ships only that, with no `src/` and no ts-node.)
 | `npm start` | run the API |
 | `npm run dev` | same, restarting on file changes |
 | `npm run typecheck` | `tsc --noEmit` — the real type check |
-| `npm test` | the test suite — 519 tests across 23 files, plain `node:test`, no database needed |
+| `npm test` | the test suite — 745 tests across 39 files when last counted, plain `node:test`, no database needed |
 | `npm run lint` | style + the model-layer import guard (`--fix` autofixes style) |
 | `npm run seed:demo` | write a fictional dataset so every screen fills in without a Partner account |
 | `npm run seed:demo:down` | remove exactly what the seeder wrote |
 | `npm run seed:demo:dist` / `:down:dist` | the same two, run from `dist/` — the only form that works inside the Docker image, which ships no `src/` and no `ts-node` |
+| `npm run auth:admin -- <command>` | account recovery: `status`, `setup-link`, `reset-link`, `revoke-sessions`, `enable`, `transfer-owner`, `repair-owner`. Prints links instead of emailing them; never takes a password. `auth:admin:dist` in the image. See [`DEPLOYMENT.md`, Account recovery (CLI)](../DEPLOYMENT.md#account-recovery-cli) |
 
 **The seeder writes fiction, so it refuses to run beside real data.** It counts what is already in
 the collections first and stops if it finds an app row that is not the demo app, or a fact row scoped
@@ -53,11 +54,18 @@ and `-- --reanchor` re-dates a demo seeded months ago to today.
 Everything is environment variables, documented inline in [`.env.example`](./.env.example) in three
 tiers.
 
-- **Tier 1 — required.** Seven entries in `TIER_1_KEYS` (`src/config/validate.ts`): `MONGO_URI`,
-  `JWT_SECRET`, `ADMIN_EMAIL`, the admin secret (`ADMIN_PASSWORD` **or** `ADMIN_PASSWORD_HASH` —
-  the hash wins when both are set), `SHOPIFY_PARTNER_ORG_ID`, `SHOPIFY_PARTNER_API_TOKEN` and
-  `SHOPIFY_PARTNER_API_VERSION`. The validator lists **every** problem at once and exits non-zero, so
-  a fresh install is fixable in one pass.
+- **Tier 1 — required.** Eight entries in `TIER_1_KEYS` (`src/config/validate.ts`): `MONGO_URI`,
+  `JWT_SECRET`, `APP_PUBLIC_URL` (the dashboard's address — every emailed link is built from it),
+  `SMTP_HOST` and `SMTP_FROM` (a mail server is required: setup confirmation, invitations and
+  password resets travel by email), `SHOPIFY_PARTNER_ORG_ID`, `SHOPIFY_PARTNER_API_TOKEN` and
+  `SHOPIFY_PARTNER_API_VERSION`. `SMTP_USER` / `SMTP_PASS` must be set together or not at all, and
+  `SETUP_OWNER_EMAIL` — which pins who may claim first-run setup, and is strongly recommended — must
+  be a bare address if set. The validator lists **every** problem at once and exits non-zero, so a
+  fresh install is fixable in one pass. For Gmail, see [`SETUP.md` § 2.3](../SETUP.md#23-outgoing-mail).
+
+  There is no sign-in password in `.env`. The first person through the dashboard's setup screen
+  creates the owner account; everyone else is invited. `ADMIN_EMAIL` / `ADMIN_PASSWORD` /
+  `ADMIN_PASSWORD_HASH` from the single-operator build are ignored, and boot warns while they are set.
 
   ⚠️ `SHOPIFY_PARTNER_APP_ID` is *not* on that list. It **warns and boots** — but no app row is
   created, so nothing ever syncs and every figure is unavailable. In practice it is required.
@@ -74,7 +82,7 @@ tiers.
   and `REVENUE_REPORTING_CURRENCY` — and changing them changes what the dashboard says happened. See
   [`docs/FIDELITY.md`](./docs/FIDELITY.md) §7.
 
-`process.env` is read in exactly one file, `src/config/index.ts` — **53 names, and nothing else in
+`process.env` is read in exactly one file, `src/config/index.ts` — **70 names, and nothing else in
 `src` reads it.** Everywhere else consumes `config.<SECTION>.<FIELD>`. If you are adding a setting,
 that is where it goes, and it needs a row in `DEPLOYMENT.md` §3, whose table is exhaustive against
 this file.
@@ -123,7 +131,7 @@ src/
 ├── config/        the ONLY reader of process.env
 ├── core/          process bootstrap (database connection, shutdown)
 ├── models/        mongoose schemas — importable only from a repositories/ folder
-├── modules/       eight domains (auth, partner, revenue, bigquery, sync, store,
+├── modules/       nine domains (auth, mail, partner, revenue, bigquery, sync, store,
 │                  conversion, shared), each split by ROLE:
 │                    services/     orchestration + business logic
 │                    repositories/ model access — the only files that touch src/models
@@ -133,10 +141,12 @@ src/
 │                    constants/    vocabularies
 │                    types/        declarations only
 │                  plus an index.ts barrel enumerating each module's exports
-│                  (7 of the 8 — `shared` has none, and is imported by deep path)
+│                  (8 of the 9 — `shared` has none, and is imported by deep path)
 ├── controllers/   <domain>.controller.ts — thin: validate, call a service, respond
 ├── routes/        <domain>.routes.ts — index.ts is the security seam
-├── middlewares/   verifyAdmin, loginRateLimit, securityHeaders
+├── middlewares/   authenticate, requirePermission, loginRateLimit, authFlowRateLimit,
+│                  securityHeaders, terminalErrorHandler
+├── scripts/       seedDemo / teardownDemo, and authAdmin — the account-recovery CLI
 ├── constants/     cross-module vocabularies
 ├── types/         shared type declarations
 └── utils/         shared helpers
@@ -157,18 +167,37 @@ The rule, the four legal deep-path exceptions and the incident are in
 
 ## Authentication
 
-Every `/api/*` route sits behind the admin guard — 36 of the 38 routes. The only open endpoints are
-`POST /api/auth/login` and `GET /healthz`.
+Multi-user, with roles. The first-run setup screen creates the **owner**, once, and then locks for
+good; everyone else joins by emailed **invitation**. There is no public sign-up. Four built-in roles
+(Owner, Admin, Analyst, Viewer) and owner-made custom roles draw on a fixed catalogue of twelve
+permissions. The full model is [`IMPLEMENTATION.md`](../IMPLEMENTATION.md) §3.5; the operator's view
+is [`DEPLOYMENT.md`, Users, roles and permissions](../DEPLOYMENT.md#users-roles-and-permissions).
 
-This is asserted by a test that walks the live Express router stack and fails on any route reachable
-without the guard — because the failure mode here is silent. A route file that mounts its handlers
+Of the 66 routes, **10 are public** — `GET /healthz`, sign-in, and the setup, invitation-acceptance
+and password-reset flows under `/api/auth` — and **56 sit behind `authenticate`**, each also
+declaring the one permission it needs (`requirePermission(...)`, or `requireSelf()` for
+`/api/account`). Two tests walk the live Express router stack: one fails on any route reachable
+without the guard, the other on any guarded route whose permission is missing, misplaced or not the
+one its table names — because both failure modes are silent. A route file that mounts its handlers
 bare looks completely correct in review and ships an unauthenticated analytics API.
 
-The login endpoint is throttled in-process (`AUTH_LOGIN_RATE_LIMIT_MAX`, default 10 failed attempts
-per 15 minutes, keyed on `req.ip`). ⚠️ Behind any proxy — including the dashboard's own, which is
-always present — set `TRUST_PROXY` or that key is a container address and every caller shares one
-bucket. The limiter fails **open** and holds no state on disk, deliberately: there is one account and
-no password reset, so a restart must always clear a block.
+The session token names a session row and a user and nothing else; every request re-reads both, plus
+the role, so a sign-out, a disable or a role change takes effect on the next request. A database
+failure while checking is a `503`, never a `401`, so it does not sign anyone out.
+
+Four in-process rate limiters guard the public endpoints: sign-in (`AUTH_LOGIN_RATE_LIMIT_MAX`,
+default 10 failed attempts per 15 minutes), and forgot-password, the setup request and the emailed-link
+pages (`AUTH_PUBLIC_FLOW_RATE_LIMIT_MAX`, 10 per 15 minutes each). ⚠️ The first three are keyed on
+`req.ip`: behind the dashboard's own proxy, which is always present, every caller shares one bucket
+per limiter unless a real reverse proxy is in front and `TRUST_PROXY` is set for it — leave it unset
+for the bundled stack alone (see `.env.example`). The emailed-link limiter is keyed on the link's
+token instead. All four fail **open**, trickle one request every 30 seconds once spent, and hold no
+state on disk, so a restart always clears a block. A sign-in success clears nothing, an abandoned
+attempt is still charged, and a browser that has signed in before gets a device budget of its own on
+its next sign-in, so a flood on the shared bucket does not keep a returning user out.
+
+When mail or the dashboard cannot help — a forgotten password with mail down, the only admin
+disabled, a missing owner — `npm run auth:admin -- <command>` works from the server's shell.
 
 ---
 

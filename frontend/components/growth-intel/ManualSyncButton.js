@@ -1,13 +1,23 @@
-import { Button } from '@shopify/polaris';
+import { Button, Tooltip } from '@shopify/polaris';
 import { useCallback, useContext, useRef, useState } from 'react';
 import LoaderContext from '../../contexts/loaderContext';
 import GrowthIntelSyncApiService from '../../API_Services/growth-intel/syncService';
+import { isForbiddenResponse } from '../../utils/permissions';
 
 const SYNC_API = new GrowthIntelSyncApiService();
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_MS = 5 * 60 * 1000;
 const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'CANCELLED'];
+
+/**
+ * Shown on a 401. The axios interceptor is already navigating to /login, so this is the last thing
+ * the user sees of this page and it has to say what happened, not that they lack a privilege.
+ */
+const SESSION_EXPIRED_MESSAGE = 'Your session has expired. Please sign in again.';
+
+/** Shown on a 403 whose envelope carried no message of its own. */
+const FORBIDDEN_FALLBACK_MESSAGE = 'Your role does not allow starting this sync.';
 
 /**
  * Reusable manual-sync trigger button: enqueue, then poll to a terminal status.
@@ -47,6 +57,18 @@ const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'CANCELLED'];
  * @param {Function} [props.onFinish]  - Called regardless of terminal outcome, INCLUDING with `null`
  *   when the enqueue was refused or the poll deadline passed.
  * @param {Boolean}  [props.disabled]
+ * @param {String}   [props.disabledReason] - Why it is disabled — a missing permission, a data source
+ *   that is not configured. Shown as the button's tooltip. Callers that can also print it beside the
+ *   button should: a tooltip on a disabled control is easy to miss.
+ *
+ * ── WHAT A REFUSAL SAYS ────────────────────────────────────────────────────
+ *   401 → "Your session has expired" (the redirect to /login is already under way).
+ *   403 → the SERVER'S sentence, which names the permission. (The session re-reads the role by
+ *         itself: the axios client reports every 403 to it.)
+ *   Anything else → the server's message, or a generic failure.
+ * This used to answer every refusal with "Permission denied. Please log in as super admin." — a
+ * sentence about an account type this build never had, shown for an expired session as much as for
+ * a real refusal.
  */
 const ManualSyncButton = ({
     jobType,
@@ -56,7 +78,8 @@ const ManualSyncButton = ({
     variant,
     onSuccess,
     onFinish,
-    disabled
+    disabled,
+    disabledReason
 }) => {
     const { showToast } = useContext(LoaderContext) || {};
     const [isSyncing, setIsSyncing] = useState(false);
@@ -87,9 +110,17 @@ const ManualSyncButton = ({
             return;
         }
         SYNC_API.getJob(jobId, (resp) => {
-            if (!resp || resp.resource_access === 'NOT_ALLOWED') {
+            if (resp && resp.resource_access === 'NOT_ALLOWED') {
                 if (showToast) {
-                    showToast('Permission denied. Please log in as super admin.', true);
+                    showToast(SESSION_EXPIRED_MESSAGE, true);
+                }
+                _finish(null);
+                return;
+            }
+            // The role lost `sync:read` mid-poll. The job keeps running; only watching it stops.
+            if (isForbiddenResponse(resp)) {
+                if (showToast) {
+                    showToast(resp.msg || FORBIDDEN_FALLBACK_MESSAGE, true);
                 }
                 _finish(null);
                 return;
@@ -139,9 +170,23 @@ const ManualSyncButton = ({
         setIsSyncing(true);
         pollDeadlineRef.current = Date.now() + MAX_POLL_MS;
         _enqueue((resp) => {
-            if (!resp || resp.resource_access === 'NOT_ALLOWED') {
+            if (resp && resp.resource_access === 'NOT_ALLOWED') {
                 if (showToast) {
-                    showToast('Permission denied. Please log in as super admin.', true);
+                    showToast(SESSION_EXPIRED_MESSAGE, true);
+                }
+                _finish(null);
+                return;
+            }
+            if (isForbiddenResponse(resp)) {
+                if (showToast) {
+                    showToast(resp.msg || FORBIDDEN_FALLBACK_MESSAGE, true);
+                }
+                _finish(null);
+                return;
+            }
+            if (!resp) {
+                if (showToast) {
+                    showToast('Failed to start sync.', true);
                 }
                 _finish(null);
                 return;
@@ -161,7 +206,7 @@ const ManualSyncButton = ({
         // `payload` is read inside _enqueue now, so it travels through that dependency.
     }, [jobType, trigger, _enqueue, showToast, _pollJob, _finish]);
 
-    return (
+    const button = (
         <Button
             variant={variant || 'primary'}
             loading={isSyncing}
@@ -171,6 +216,11 @@ const ManualSyncButton = ({
             {label || 'Sync now'}
         </Button>
     );
+
+    if (disabled && disabledReason && !isSyncing) {
+        return <Tooltip content={disabledReason}>{button}</Tooltip>;
+    }
+    return button;
 };
 
 export default ManualSyncButton;

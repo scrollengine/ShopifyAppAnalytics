@@ -6,7 +6,7 @@
  *  The backend issues a bearer JWT from `POST /api/auth/login` and expects it
  *  back as `Authorization: Bearer <token>` on every other call. It reads no
  *  cookie and accepts no `?token=` query parameter, deliberately (see the
- *  backend's `middlewares/verifyAdmin.ts` for why).
+ *  backend's `middlewares/authenticate.ts` for why).
  *
  *  ── WHY localStorage AND NOT A COOKIE ───────────────────────────────────────
  *  A cookie is attached by the browser automatically, on cross-site requests
@@ -81,3 +81,47 @@ export const clearAuthToken = () => setAuthToken('');
  * @returns {Boolean} True when a non-empty token is stored.
  */
 export const hasAuthToken = () => Boolean(getAuthToken());
+
+/**
+ * localStorage key holding this browser's sign-in DEVICE token. Not a credential: it grants no
+ * access and skips no password check. It proves this browser signed in to one account before, which
+ * gives the next sign-in for that account a rate-limit budget of its own — so someone flooding the
+ * sign-in endpoint cannot keep a returning user out (see the backend's `middlewares/loginRateLimit.ts`).
+ *
+ * Deliberately NOT cleared on sign-out: a signed-out browser is exactly the one that needs it next.
+ */
+export const LOGIN_DEVICE_KEY = 'saa.loginDevice';
+
+/**
+ * Reads the stored sign-in device token.
+ *
+ * @returns {String} The token, or '' when absent, unreadable, or running on the server.
+ */
+export const getLoginDeviceToken = () => {
+    if (typeof window === 'undefined') {
+        return '';
+    }
+    try {
+        return window.localStorage.getItem(LOGIN_DEVICE_KEY) || '';
+    } catch (e) {
+        return '';
+    }
+};
+
+/**
+ * Stores the device token a successful sign-in returned. An empty value is ignored rather than
+ * clearing the stored one: a response without the field must not cost the browser its budget.
+ *
+ * @param {String} token - `data.device_token` from `POST /api/auth/login`.
+ * @returns {void}
+ */
+export const setLoginDeviceToken = (token) => {
+    if (typeof window === 'undefined' || typeof token !== 'string' || !token) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(LOGIN_DEVICE_KEY, token);
+    } catch (e) {
+        // Storage blocked: the next sign-in simply shares the common budget.
+    }
+};

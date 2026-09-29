@@ -3,8 +3,10 @@ import { useCallback, useContext, useState } from 'react';
 import SideNavBar from '../../components/sideNavBar';
 import LoaderContext from '../../contexts/loaderContext';
 import { APPS_STATE, useGrowthIntel } from '../../contexts/growthIntelContext';
+import { useSession } from '../../contexts/sessionContext';
 import PartnerAppForm from '../../components/growth-intel/PartnerAppForm';
 import { DASHBOARD_ROUTES } from '../../utils/dashboardRoutes';
+import { PERMISSIONS, canViewPage, permissionLabel } from '../../utils/permissions';
 
 /**
  * =============================================================================
@@ -62,6 +64,15 @@ import { DASHBOARD_ROUTES } from '../../utils/dashboardRoutes';
  *  A one-sentence pointer to the Overview sits under the roster instead, so an
  *  operator who used to read the figures here knows where they went. Keep it a
  *  pointer. A "small" summary rebuilt here is this same duplication again.
+ *
+ *  ── READING IS EVERYONE'S; REGISTERING IS `apps:manage` ─────────────────────
+ *  Every role holds `apps:read`, so every role sees the roster and can choose
+ *  which app to report on (that choice is local to this browser). Registering an
+ *  app writes to the install, so the form and the "Register another app" action
+ *  are HIDDEN for a role without `apps:manage` — not disabled: there is nothing a
+ *  reader without it can do with a form. The fresh-install empty state then says
+ *  that an Owner or Admin has to register the app, rather than showing a form
+ *  whose Save would answer 403.
  * =============================================================================
  */
 
@@ -121,6 +132,9 @@ const FactRow = ({ label, value, hint }) => {
 const PartnerAppsPage = () => {
     const { toastMarkup } = useContext(LoaderContext) || {};
     const { apps, appId, setAppId, selectedApp, appsLoading, appsState, appsError, hydrated, refreshApps } = useGrowthIntel();
+    const session = useSession();
+    const canManage = session.can(PERMISSIONS.APPS_MANAGE);
+    const canOpenOverview = canViewPage(session.permissions, DASHBOARD_ROUTES.OVERVIEW);
 
     // Open on demand once at least one app exists; on a fresh install the form is always on screen
     // (see `showForm` below) because there is nothing else the operator could usefully do.
@@ -300,14 +314,19 @@ const PartnerAppsPage = () => {
     // It carries no data state of its own on purpose: it makes no claim about the app, so there is
     // nothing for it to be wrong about. The sync answer this screen owes the reader is the three
     // timestamps on each card above — they name the watermark rather than implying it.
-    const overviewPointer = (
-        <Text as="p" variant="bodySm" tone="subdued">
-            Installs, trials, subscriptions and revenue for the selected app are on the{' '}
-            <Link url={DASHBOARD_ROUTES.OVERVIEW} removeUnderline>Overview</Link>. The sync
-            timestamps on each card above are this page&apos;s own answer to whether an app has
-            synced yet.
-        </Text>
-    );
+    //
+    // Only for a role that can open the Overview: a link onto "Restricted" forwards nobody anywhere.
+    let overviewPointer = null;
+    if (canOpenOverview) {
+        overviewPointer = (
+            <Text as="p" variant="bodySm" tone="subdued">
+                Installs, trials, subscriptions and revenue for the selected app are on the{' '}
+                <Link url={DASHBOARD_ROUTES.OVERVIEW} removeUnderline>Overview</Link>. The sync
+                timestamps on each card above are this page&apos;s own answer to whether an app has
+                synced yet.
+            </Text>
+        );
+    }
 
     // ── Page body ────────────────────────────────────────────────────────────────────────────
     // FIVE states now, not three, and the two that were added are the two that were being ANSWERED
@@ -355,7 +374,30 @@ const PartnerAppsPage = () => {
     // UNAUTHENTICATED leaves `body` null on purpose: the axios interceptor has already begun the
     // redirect to /login, and a page that draws anything at all during it reads as a live screen.
 
-    if (hydrated && appsState === APPS_STATE.READY && apps.length === 0) {
+    if (hydrated && appsState === APPS_STATE.READY && apps.length === 0 && !canManage) {
+        // A measured empty roster, and a role that cannot fill it. Same READY gate as the branch below
+        // — this is still a claim about the account — but the next step is a person, not a form.
+        let roleLabel = 'your role';
+        if (session.role && session.role.label) {
+            roleLabel = session.role.label;
+        }
+        body = (
+            <Card>
+                <BlockStack gap="300">
+                    <Text as="h2" variant="headingLg">No partner app is registered yet</Text>
+                    <Text as="p" variant="bodyMd">
+                        This dashboard reports on one Shopify Partner app at a time, and nothing else in it can load
+                        until an app is registered.
+                    </Text>
+                    <Text as="p" variant="bodyMd" tone="subdued">
+                        {`Registering one needs ${permissionLabel(PERMISSIONS.APPS_MANAGE)}, which the ${roleLabel} role does not include. Ask an Owner or Admin to register the app; it will appear here as soon as they have.`}
+                    </Text>
+                </BlockStack>
+            </Card>
+        );
+    }
+
+    if (hydrated && appsState === APPS_STATE.READY && apps.length === 0 && canManage) {
         body = (
             <BlockStack gap="400">
                 <Card>
@@ -381,7 +423,7 @@ const PartnerAppsPage = () => {
 
     if (hydrated && apps.length > 0) {
         let addSection = null;
-        if (addOpen) {
+        if (addOpen && canManage) {
             // ⚠️ The form's own Cancel button pushes to `/apps` — which IS this route,
             // so Next re-renders without remounting and `addOpen` survives: from the operator's
             // side, Cancel appears to do nothing. This header row is the working way out, and it
@@ -428,7 +470,7 @@ const PartnerAppsPage = () => {
     // Only offered once an app exists: on a fresh install the form is already on screen, and a
     // button that opens what is already open reads as a broken control.
     let primaryAction = null;
-    if (hydrated && apps.length > 0 && !addOpen) {
+    if (hydrated && apps.length > 0 && !addOpen && canManage) {
         primaryAction = <Button variant="primary" onClick={() => setAddOpen(true)}>Register another app</Button>;
     }
 
@@ -438,7 +480,7 @@ const PartnerAppsPage = () => {
                 title="Partner Apps"
                 subtitle="The Shopify app this install reports on. Everything else is scoped by the selection made here."
                 fullWidth
-                backAction={{ content: 'Growth Intelligence', url: DASHBOARD_ROUTES.OVERVIEW }}
+                backAction={canOpenOverview ? { content: 'Growth Intelligence', url: DASHBOARD_ROUTES.OVERVIEW } : undefined}
                 primaryAction={primaryAction}
             >
                 <BlockStack gap="400">

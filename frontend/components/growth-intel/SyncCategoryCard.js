@@ -12,13 +12,19 @@ const _fmtWhen = (iso) => {
  * One background-job category: what it pulls, when it runs itself, when it last succeeded, and the
  * buttons to force it.
  *
- * ── THREE REASONS A BUTTON MAY BE OFF, AND THEY ARE NOT THE SAME ──────────
+ * ── FOUR REASONS A BUTTON MAY BE OFF, AND THEY ARE NOT THE SAME ───────────
  *   1. NO APP SELECTED  — an APP-scoped job has no target. Says so.
  *   2. `disabled`       — the caller knows this job CANNOT succeed right now (its data source is
  *                         not configured). `disabledReason` is then MANDATORY: a dead button with
  *                         no explanation is worse than one that fails, because a failure at least
  *                         carries a message.
- *   3. Already running  — owned by `ManualSyncButton` itself, which goes into its loading state on
+ *   3. `permissionReason` — the signed-in role does not include the permission that starts this
+ *                         job (`sync:run`, or `sync:run_billed` for a BigQuery scan). Separate from
+ *                         (2) because the remedy is different — (2) is fixed in the API's
+ *                         environment, this one only by an Owner or Admin changing the role — and
+ *                         both can hold at once. A non-empty string both blocks and explains, so the
+ *                         reason cannot be forgotten.
+ *   4. Already running  — owned by `ManualSyncButton` itself, which goes into its loading state on
  *                         click and stays there until the job reaches a terminal status.
  *
  * ── ⚠️ "NEVER COMPLETED SUCCESSFULLY" IS A CLAIM, NOT A DEFAULT ──────────────
@@ -39,6 +45,8 @@ const _fmtWhen = (iso) => {
  * @param {String}   props.appId       - selected partner app; '' when none.
  * @param {Boolean}  [props.disabled]  - Blocks every action in this card.
  * @param {String}   [props.disabledReason] - Why. Required whenever `disabled` is true.
+ * @param {String}   [props.permissionReason] - Non-empty when the role cannot start this job; the
+ *   sentence saying so. Blocks every action in this card, the inline estimate included.
  * @param {Function} props.showToast
  * @param {Function} props.onFinish    - called after any triggered job reaches a terminal status.
  * @param {Function} props.onNavigate  - router push, for the entity-scoped categories.
@@ -51,13 +59,15 @@ const SyncCategoryCard = ({
     appId,
     disabled,
     disabledReason,
+    permissionReason,
     showToast,
     onFinish,
     onNavigate
 }) => {
     const needsApp = category.scope === SYNC_SCOPES.APP;
     const missingApp = needsApp && !appId;
-    const blocked = missingApp || disabled === true;
+    const permissionBlocked = typeof permissionReason === 'string' && permissionReason.length > 0;
+    const blocked = missingApp || disabled === true || permissionBlocked;
 
     // Every action closure is built from this, so it is memoized rather than rebuilt per render.
     const ctx = useMemo(() => ({ appId, showToast }), [appId, showToast]);
@@ -88,9 +98,13 @@ const SyncCategoryCard = ({
     }
 
     // ── Why the buttons are off ──────────────────────────────────────────────────────────────
-    // Both reasons can hold at once (nothing configured AND no app picked), and each is separately
-    // actionable, so they are listed rather than collapsed into whichever was checked first.
+    // Several reasons can hold at once (no permission AND nothing configured AND no app picked), and
+    // each is separately actionable, so they are listed rather than collapsed into whichever was
+    // checked first. The permission comes first: while it holds, the other two are moot for this user.
     const blockedNotes = [];
+    if (permissionBlocked) {
+        blockedNotes.push({ key: 'permission', text: permissionReason });
+    }
     if (disabled === true && disabledReason) {
         blockedNotes.push({ key: 'disabled', text: disabledReason });
     }

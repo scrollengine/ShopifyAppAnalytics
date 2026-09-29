@@ -407,38 +407,180 @@ export interface SyncJobDoc extends Timestamped {
     attempts?: number;
 }
 
-// ── Operators ───────────────────────────────────────────────────────────────
+// ── Auth ────────────────────────────────────────────────────────────────────
+//
+// The documents below are not analytics data. They live here anyway because this file is where
+// PERSISTED shapes are declared and `shared/repositories/models.repository` is the only place a
+// shape is attached to a model — a second home for document types would mean a second place to look,
+// and eventually a second place that casts.
+//
+// None carries a `partner_app_id`, and that is not an omission: a user is not scoped to an app. This
+// build analyses one app, and what a user may see of it is decided by their role, per request.
+//
+// Every `password_hash` / `token_hash` / `claim` below is OPTIONAL because the schema declares it
+// `select: false`: it is absent from an ordinary read, and a reader that finds it undefined has
+// almost certainly not gone through the one repository function that asks for it.
 
 /**
- * An operator who may log in to this deployment.
- *
- * The one document in this file that is not analytics data. It lives here anyway because this file
- * is where PERSISTED shapes are declared and `shared/repositories/models.repository` is the only
- * place a shape is attached to a model — a second home for document types would mean a second place
- * to look, and eventually a second place that casts.
- *
- * There is no `partner_app_id` on it, and that is not an omission: an operator is not scoped to an
- * app. This build analyses one app, and everyone who can log in sees it.
+ * LEGACY — an operator account from the single-operator build. Never read by sign-in; read only as
+ * the setup allow-list (while `SETUP_OWNER_EMAIL` is unset) and marked `legacy_at` at boot.
  */
 export interface AdminUserDoc extends Timestamped {
     _id: ObjectIdLike;
-    /**
-     * Login identity, stored lowercased and trimmed by the schema.
-     *
-     * ⚠️ Normalise the same way BEFORE querying (`String(email).trim().toLowerCase()`). Mongoose
-     * applies `lowercase` to writes and to query casting on this path, but an aggregate does not
-     * cast at all — so code that leans on the schema works right up until someone reaches for a
-     * pipeline, and then silently matches nothing.
-     */
+    /** The v0.1 login identity, stored lowercased and trimmed. */
     email: string;
-    /**
-     * bcrypt hash of the operator's password.
-     *
-     * ⚠️ `select: false` on the schema, so this is ABSENT from an ordinary read and typing it
-     * optional is the truthful shape — a reader that finds it undefined has almost certainly
-     * forgotten `.select('+password_hash')`, which only the login path should ever write.
-     */
+    /** v0.1 bcrypt hash. `select: false`; nothing in the current build reads it. */
     password_hash?: string;
-    /** Last successful login. `null` on an account that has been created but never used. */
     last_login_at?: Date | null;
+    /** When boot marked the row legacy. `null` / absent on a row this build has not marked yet. */
+    legacy_at?: Date | null;
+}
+
+/**
+ * The one install document (`_id: 'install'`).
+ *
+ * ⚠️ `_id` is a STRING here, unlike every other document in this file.
+ */
+export interface SystemStateDoc extends Timestamped {
+    _id: string;
+    /** `null` while setup is open. Set once, by CAS. */
+    setup_completed_at: Date | null;
+    /** The owner pointer — the ONLY definition of who the owner is. */
+    owner_user_id: ObjectIdLike | null;
+    /** The SETUP_VERIFY token whose claim completed setup. */
+    setup_token_id: ObjectIdLike | null;
+}
+
+/** A person who can sign in. */
+export interface UserDoc extends Timestamped {
+    _id: ObjectIdLike;
+    /** Stored lowercased and trimmed; normalise the same way before querying. */
+    email: string;
+    name: string;
+    /** `select: false` — present only on a `…WithHash` repository read. */
+    password_hash?: string;
+    /** One of `STORED_ROLE_KEYS` — never `'owner'` (ownership is the install pointer). */
+    role_key: string;
+    /** Set iff `role_key === 'custom'`. */
+    custom_role_id: ObjectIdLike | null;
+    /** One of `USER_STATUSES`. */
+    status: string;
+    email_verified_at: Date | null;
+    password_changed_at: Date | null;
+    last_login_at: Date | null;
+    invited_by_user_id: ObjectIdLike | null;
+    /** One of `CREATED_VIA`. */
+    created_via: string;
+    disabled_at: Date | null;
+    disabled_by_user_id: ObjectIdLike | null;
+    /**
+     * Session generation; a session whose `epoch` differs is refused.
+     *
+     * Typed non-optional because the schema defaults it to 0 — but a `.lean()` read of a row that
+     * somehow lacks it returns `undefined`, so compare it with `!==` against the session's value
+     * rather than doing arithmetic on it.
+     */
+    session_epoch: number;
+    /** Password-reset sends, NEWEST FIRST, length-capped by the writer. */
+    reset_send_log: Date[];
+}
+
+/** A custom role. */
+export interface RoleDoc extends Timestamped {
+    _id: ObjectIdLike;
+    name: string;
+    /** NFC + trim + lowercase of `name`; the uniqueness key. */
+    name_norm: string;
+    description: string;
+    /** Catalogue keys as written. Unknown keys read back are dropped by `resolvePrincipal`, never honoured. */
+    permissions: string[];
+    created_by_user_id: ObjectIdLike | null;
+    updated_by_user_id: ObjectIdLike | null;
+}
+
+/** An emailed invitation. Its state is computed by `invite.helper#inviteState`, never stored. */
+export interface InviteDoc extends Timestamped {
+    _id: ObjectIdLike;
+    email: string;
+    /** Present ONLY while outstanding (unset on accept and revoke). Never `null`. */
+    pending_email?: string;
+    role_key: string;
+    custom_role_id: ObjectIdLike | null;
+    /** Who currently answers for the invite — replaced by a resend and by an ownership transfer. */
+    invited_by_user_id: ObjectIdLike;
+    /** Who created it. Never changes. */
+    created_by_user_id: ObjectIdLike;
+    /** `select: false`; the repository compares and strips it — a service never sees it. */
+    token_hash?: string;
+    expires_at: Date;
+    accepted_at: Date | null;
+    accepted_user_id: ObjectIdLike | null;
+    revoked_at: Date | null;
+    revoked_by_user_id: ObjectIdLike | null;
+    /** One of `INVITE_REVOKE_REASONS` (free String on the schema). */
+    revoked_reason: string | null;
+    last_sent_at: Date | null;
+    send_count: number;
+    /** Send times, NEWEST FIRST, length-capped by the writer. */
+    send_log: Date[];
+}
+
+/** The setup claim written by the CAS that spends a SETUP_VERIFY token. */
+export interface AuthTokenClaim {
+    name?: string;
+    password_hash?: string;
+}
+
+/** A single-use email-link token. */
+export interface AuthTokenDoc extends Timestamped {
+    _id: ObjectIdLike;
+    /** One of `TOKEN_PURPOSES`. */
+    purpose: string;
+    /** `select: false`; the repository compares and strips it — a service never sees it. */
+    token_hash?: string;
+    email: string;
+    /** `null` for SETUP_VERIFY. */
+    user_id: ObjectIdLike | null;
+    /** SETUP_VERIFY only. */
+    name: string | null;
+    expires_at: Date;
+    used_at: Date | null;
+    revoked_at: Date | null;
+    request_ip: string | null;
+    /** `select: false`, absent until the setup claim writes it; read only via `findByIdWithClaim`. */
+    claim?: AuthTokenClaim;
+}
+
+/** A signed-in session. `_id` is the JWT `sid`. */
+export interface AuthSessionDoc extends Timestamped {
+    _id: ObjectIdLike;
+    user_id: ObjectIdLike;
+    /** The user's `session_epoch` at sign-in. */
+    epoch: number;
+    expires_at: Date;
+    revoked_at: Date | null;
+    /** One of `SESSION_REVOKE_REASONS` (free String on the schema). */
+    revoked_reason: string | null;
+    ip: string | null;
+    user_agent: string | null;
+}
+
+/** One row of the security activity log. */
+export interface AuditEventDoc extends Timestamped {
+    _id: ObjectIdLike;
+    /** One of `AUDIT_ACTOR_TYPES`. */
+    actor_type: string;
+    actor_user_id: ObjectIdLike | null;
+    actor_email: string | null;
+    /** One of `AUDIT_ACTIONS` (free String on the schema, so an unknown action is still recorded). */
+    action: string;
+    /** One of `AUDIT_TARGET_TYPES`, or `null`. */
+    target_type: string | null;
+    target_id: string | null;
+    target_email: string | null;
+    ip: string | null;
+    /** Small, action-specific facts. Never a token, hash, password or link. */
+    details: Record<string, unknown>;
+    /** ANONYMOUS rows only; drives the 180-day TTL. */
+    expires_at?: Date;
 }

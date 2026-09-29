@@ -37,6 +37,28 @@ import AxiosClientProvider from '../apiClient';
  */
 const resourceNotAllowed = { resource_access: 'NOT_ALLOWED' };
 
+/**
+ * The API's own 403 envelope, when that is what `err` carries.
+ *
+ * Forwarded INTACT rather than flattened to `{}`: its `error: { code: 'FORBIDDEN', permission }` is
+ * what lets `readDataState` say "Restricted — your role does not include …". Flattened, a role that
+ * lacks the permission would read "This could not be loaded" — a failure nobody can fix from a log,
+ * reported in place of the access the reader actually lacks.
+ *
+ * @param {Object} err - The axios error.
+ * @returns {Object|null} The envelope, or null when this is not a 403 with a body.
+ */
+const _forbiddenEnvelope = (err) => {
+    if (!err || !err.response || err.response.status !== 403) {
+        return null;
+    }
+    const body = err.response.data;
+    if (!body || typeof body !== 'object') {
+        return null;
+    }
+    return body;
+};
+
 class GrowthIntelMetaApiService {
     constructor() {
         this.apiClient = new AxiosClientProvider().getClient();
@@ -46,8 +68,8 @@ class GrowthIntelMetaApiService {
      * Reads the coverage measurements for one partner app.
      *
      * @param {Object} params - { partner_app_id } — required.
-     * @param {Function} cb - Receives `{ status, msg, data }`, or `{}` / `resourceNotAllowed` on
-     * failure.
+     * @param {Function} cb - Receives `{ status, msg, data }`, the 403 envelope when the role lacks
+     * `apps:read`, or `{}` / `resourceNotAllowed` on failure.
      * @returns {void}
      */
     getCoverage(params, cb) {
@@ -56,6 +78,8 @@ class GrowthIntelMetaApiService {
             .then((response) => { cb(response && response.data ? response.data : {}); })
             .catch((err) => {
                 if (err.response && err.response.status === 401) { cb(resourceNotAllowed); return; }
+                const forbidden = _forbiddenEnvelope(err);
+                if (forbidden) { cb(forbidden); return; }
                 console.log('GrowthIntel meta.getCoverage error', err);
                 cb({});
             });

@@ -8,7 +8,8 @@
  *  Produces, for the whole mounted tree, one record per (method, full path):
  *  the complete ordered list of middleware a request to that path must pass
  *  through first. That list is what `routeGuard.test.js` checks for
- *  `verifyAdmin`.
+ *  `authenticate`, and what `permissionMap.test.js` reads each route's policy
+ *  tag (`requirePermission` / `requireSelf`) from.
  *
  *  ──  Why this instruments Express instead of reading its stack ────────────
  *  Express 5 does NOT keep the mount path. `Layer` sets `this.path = undefined`
@@ -36,9 +37,18 @@
  *  middleware protects what was registered AFTER it and nothing that was
  *  registered before. So a guard is credited to a route only when it appears
  *  EARLIER in the same router (or in an ancestor), which is what makes this
- *  harness able to catch the specific regression of moving `verifyAdmin` below
+ *  harness able to catch the specific regression of moving `authenticate` below
  *  a mount that used to sit under it — a change that looks like a reordering
  *  and is actually an authentication bypass.
+ *
+ *  ── Route layers are read PER METHOD ────────────────────────────────────────
+ *  `router.route('/x').get(a, h1).post(b, h2)` puts four layers on ONE route,
+ *  each carrying its own `layer.method`. Reading the whole stack as one chain
+ *  would credit `a` to POST and `h1` as POST's middleware. So each method's
+ *  chain is the route's layers filtered by `layer.method`. An `.all()` layer
+ *  has no method at all — it runs for every verb — so a route that has one is
+ *  reported as UNANALYSABLE rather than guessed at: a policy that silently
+ *  covers verbs nobody listed is the thing the permission map exists to stop.
  * ============================================================================
  */
 
@@ -111,11 +121,15 @@ const _isRouter = (handler) => {
  * @param {Object} params0 - The parameters object.
  * @param {*} params0.expressModule - The `express` module, whose `Router` prototype is wrapped.
  * @param {Function} params0.load - Returns the root router. Must require it inside this call.
+ * @param {Function} [params0.readTag] - `(fn) => string|null`, read for every guard and route
+ * middleware (e.g. `requirePermission.readPolicyTag`). Defaults to "untagged".
  * @returns {{ routes: Array, root: Function, unanalysable: Array }} `routes` holds one record per
- * (method, path): `{ method, path, guards, route_middleware, handler }`. `unanalysable` names any
- * layer registered with a RegExp or array path, which cannot be resolved to an absolute string.
+ * (method, path): `{ method, path, guards, guard_tags, route_middleware, route_tags, handler }`,
+ * where each `*_tags` array is index-aligned with its name array. `unanalysable` names any layer
+ * registered with a RegExp or array path (no absolute string) and any route carrying `.all()`.
  */
-const buildRouteMap = ({ expressModule, load }) => {
+const buildRouteMap = ({ expressModule, load, readTag }) => {
+    const _readTag = typeof readTag === 'function' ? readTag : () => null;
     const Router = expressModule.Router;
     const originalUse = Router.prototype.use;
     const originalRoute = Router.prototype.route;
@@ -200,21 +214,33 @@ const buildRouteMap = ({ expressModule, load }) => {
             const fullPath = _joinPath(prefix, entry.path);
 
             if (entry.route) {
-                const applicable = activeGuards
-                    .filter((guard) => _guardApplies(guard.mount, fullPath))
-                    .map((guard) => guard.name);
-                // Middleware attached to the route itself (`router.get(path, mw, handler)`). The
-                // LAST entry is the handler; anything before it guards this one route only.
-                const routeLayerNames = entry.route.stack.map((layer) => layer.name);
-                const handlerName = routeLayerNames[routeLayerNames.length - 1] || '<anonymous>';
-                const routeMiddleware = routeLayerNames.slice(0, -1);
+                const applicableGuards = activeGuards.filter((guard) => _guardApplies(guard.mount, fullPath));
+                const applicable = applicableGuards.map((guard) => guard.name);
+                const guardTags = applicableGuards.map((guard) => guard.tag);
+
+                const stack = entry.route.stack || [];
+                const hasAllLayer = Boolean((entry.route.methods || {})._all) || stack.some((layer) => !layer.method);
+                if (hasAllLayer) {
+                    unanalysable.push({ prefix: prefix, path: fullPath, reason: '.all() route — its middleware runs for every verb' });
+                    continue;
+                }
 
                 for (const method of Object.keys(entry.route.methods || {})) {
+                    // Middleware attached to the route itself (`router.get(path, mw, handler)`), for
+                    // THIS verb only. The LAST layer is the handler; anything before it guards this
+                    // one route + method only.
+                    const layers = stack.filter((layer) => layer.method === method);
+                    const layerNames = layers.map((layer) => layer.name);
+                    const handlerName = layerNames[layerNames.length - 1] || '<anonymous>';
+                    const middlewareLayers = layers.slice(0, -1);
+
                     routes.push({
                         method: method.toUpperCase(),
                         path: fullPath,
                         guards: applicable,
-                        route_middleware: routeMiddleware,
+                        guard_tags: guardTags,
+                        route_middleware: middlewareLayers.map((layer) => layer.name),
+                        route_tags: middlewareLayers.map((layer) => _readTag(layer.handle)),
                         handler: handlerName
                     });
                 }
@@ -227,7 +253,7 @@ const buildRouteMap = ({ expressModule, load }) => {
                 continue;
             }
 
-            activeGuards.push({ name: entry.handle.name || '<anonymous>', mount: fullPath });
+            activeGuards.push({ name: entry.handle.name || '<anonymous>', mount: fullPath, tag: _readTag(entry.handle) });
         }
 
         seen.delete(routerInstance);
@@ -249,7 +275,7 @@ const buildRouteMap = ({ expressModule, load }) => {
  * Formats one route record for an assertion message.
  *
  * @param {Object} route - A record from `buildRouteMap().routes`.
- * @returns {String} e.g. `GET /api/revenue/now  [guards: verifyAdmin]`.
+ * @returns {String} e.g. `GET /api/revenue/now  [guards: authenticate -> requirePermission]`.
  */
 const describeRoute = (route) => {
     const chain = route.guards.concat(route.route_middleware);

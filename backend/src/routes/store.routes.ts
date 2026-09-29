@@ -9,13 +9,15 @@
  *  Stores, Subscriptions, the install cohort on Funnel, Revenue, Revenue Churn, Logo
  *  Churn and Trial Funnel.
  *
- *  Handlers are mounted BARE here. The guard is applied ONCE, on the parent sub-router in
- *  `src/routes/index.ts`, and this file inherits it by being mounted there — see that file's header
- *  for why the guard lives in one place rather than being repeated per route file.
+ *  AUTHENTICATION is applied ONCE, on the parent sub-router in `src/routes/index.ts`, and this file
+ *  inherits it by being mounted there — see that file's header for why the guard lives in one place
+ *  rather than being repeated per route file. AUTHORISATION is per route: each line below declares
+ *  its ONE permission as its first route-level middleware (spec §4).
+ *  Both routes name stores, so both are `merchants:read`.
  *
  *  ⚠️ MOUNTING THIS ONE NEEDS A LINE IN `routes/index.ts`. `/api/stores` is a NEW area, exactly as
  *  `/api/conversion` was. `test/routeGuard.test.js` walks the live Express stack and fails on any
- *  route reachable without `verifyAdmin`, so the mount is asserted rather than assumed the moment it
+ *  route reachable without `authenticate`, so the mount is asserted rather than assumed the moment it
  *  is added.
  *
  *  ──  THE DETAIL PATH IS `/api/stores/detail`, NOT `/api/subscriptions/detail` ────────────
@@ -39,8 +41,12 @@
 
 import { Router } from 'express';
 import storeController = require('../controllers/store.controller');
+import requirePermissionMiddleware = require('../middlewares/requirePermission');
+import authModule = require('../modules/auth');
 
 const { _getStores, _getStoreDetail } = storeController;
+const { requirePermission } = requirePermissionMiddleware;
+const { PERMISSIONS } = authModule;
 
 const router = Router();
 
@@ -48,12 +54,12 @@ const router = Router();
 // `data_state` / `attribution_state` / `warnings[]` when nothing has synced or BigQuery is
 // unconfigured — deliberately NOT a refusal, which the page renders as though the operator had no
 // stores at all.
-router.get('/', _getStores);
+router.get('/', requirePermission(PERMISSIONS.MERCHANTS_READ), _getStores);
 
 // One store's full record: identity, install lifecycle, subscriptions, settled payouts, acquisition
 // and a merged timeline. ⚠️ The ONE read in this area that refuses rather than answering empty — a
 // store the Partner API has no record of cannot be described, and the drawer has no rendering for a
 // record that is present but says nothing. The refusal carries the reason, chosen by the watermark.
-router.get('/detail', _getStoreDetail);
+router.get('/detail', requirePermission(PERMISSIONS.MERCHANTS_READ), _getStoreDetail);
 
 export = router;

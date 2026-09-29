@@ -5,7 +5,11 @@
 #      cp .env.example .env     # then fill in the REQUIRED block
 #      docker compose up --build
 #
-#  Then open http://localhost:3000 and sign in with ADMIN_EMAIL / ADMIN_PASSWORD.
+#  Then open http://localhost:3000. On a fresh database the dashboard sends you
+#  to /setup: enter your email and name, open the confirmation link that arrives
+#  by email, and choose a password — that creates the OWNER account and locks
+#  setup for good. Everyone else joins by invitation from Users & roles.
+#  (DEPLOYMENT.md, step 5. Set SETUP_OWNER_EMAIL first, or setup is first-come.)
 #
 #  The first boot pulls your full Partner API history, which takes a while. The
 #  dashboard is usable immediately and shows sync progress on its Sync screen —
@@ -71,8 +75,12 @@ services:
                 condition: service_healthy
 
         # Everything comes from the root .env — no secrets in this file, so it
-        # stays safe to commit. The API token, admin password and JWT secret all
+        # stays safe to commit. The API token, SMTP password and JWT secret all
         # arrive this way.
+        #
+        # ⚠️ Compose expands `$NAME` inside unquoted and double-quoted values of
+        # that file. A secret containing `$` (an SMTP password, say) must be
+        # single-quoted there: SMTP_PASS='pa$sword'.
         env_file: .env
 
         environment:
@@ -160,6 +168,12 @@ services:
             # Left on 0.0.0.0 so you can reach it from another machine on your
             # network. If this host is not one you trust, bind it to loopback
             # instead — "127.0.0.1:3000:3000" — and reach it over an SSH tunnel.
+            #
+            # ⚠️ Until first-run setup completes, whoever reaches this port first
+            # can claim the owner account unless SETUP_OWNER_EMAIL is set (the
+            # backend WARNs at boot while that is the case). Bind to loopback
+            # until setup is done if you have not set it. Behind the nginx recipe
+            # in DEPLOYMENT.md, keep it on loopback for good.
             - "3000:3000"
 
         # Same PID 1 reasoning as the backend. The frontend's entrypoint `exec`s

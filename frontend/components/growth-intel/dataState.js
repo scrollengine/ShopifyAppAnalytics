@@ -1,13 +1,14 @@
 import { NOT_IMPLEMENTED_CODE } from '../../API_Services/growth-intel/notImplemented';
+import { forbiddenPermissionOf, isForbiddenResponse } from '../../utils/permissions';
 
 /**
  * =============================================================================
  *  The one decoder for "what KIND of nothing is this?"
  * =============================================================================
  *
- *  Every growth-intel service can answer in five materially different ways, and
- *  FOUR OF THEM ARE EMPTY. A page that tests `if (resp && resp.status &&
- *  resp.data)` collapses all four into one, and then draws its own empty state
+ *  Every growth-intel service can answer in six materially different ways, and
+ *  FIVE OF THEM ARE EMPTY. A page that tests `if (resp && resp.status &&
+ *  resp.data)` collapses all five into one, and then draws its own empty state
  *  over the top — which is how this dashboard came to publish, on a page whose
  *  endpoint was never called:
  *
@@ -22,13 +23,19 @@ import { NOT_IMPLEMENTED_CODE } from '../../API_Services/growth-intel/notImpleme
  *  the third. That is what this file is: the check, made mechanical, so that
  *  honouring the contract is less work than breaking it.
  *
- *  ── THE FIVE STATES ─────────────────────────────────────────────────────────
+ *  ── THE SIX STATES ──────────────────────────────────────────────────────────
  *
  *    NOT_IMPLEMENTED  No route serves this yet. `msg` names the endpoint that
  *                     WOULD. Nothing about the merchant's data is known, and no
  *                     sync will ever change that — which is why the generic
  *                     "run a sync" empty state is not merely unhelpful here, it
  *                     sends the operator to do something that cannot work.
+ *    FORBIDDEN        The signed-in role does not include the permission this
+ *                     endpoint needs (HTTP 403, `error.code: 'FORBIDDEN'`).
+ *                     `permission` names the key. Says NOTHING about the data —
+ *                     it may be full — so it must never draw an empty state or
+ *                     a chart; it is a statement about access, not about the
+ *                     merchant's business.
  *    NOT_CONNECTED    An upstream is unconfigured. `reason` names the missing
  *                     environment variable. This is the single most valuable
  *                     sentence the API ever emits and the easiest to discard.
@@ -40,17 +47,30 @@ import { NOT_IMPLEMENTED_CODE } from '../../API_Services/growth-intel/notImpleme
  *    ERROR            The call failed. Distinct from NOT_CONNECTED because one
  *                     is fixed in `.env` and the other by looking at a log.
  *
+ *  ── THE ORDER THE CHECKS RUN IN IS PART OF THE CONTRACT ─────────────────────
+ *      1. the 401 sentinel      — it has no `status` key at all;
+ *      2. NOT_IMPLEMENTED       — its envelope sets `status: false` on purpose;
+ *      3. `{}`                  — nothing came back;
+ *      4. FORBIDDEN             — BEFORE the NOT_CONNECTED heuristic, because a
+ *                                 403 is `status: false` with a message, and step 5
+ *                                 would file it as a failure ("This could not be
+ *                                 loaded"), sending the reader to a server log over
+ *                                 a role only an Owner or Admin can change;
+ *      5. status:false          — refusal (NOT_CONNECTED) or failure (ERROR);
+ *      6. status:true           — READY, or NEVER_SYNCED when nothing was measured.
+ *
  *  ── WHY A FUNCTION AND NOT A HOOK ───────────────────────────────────────────
  *  Pure, synchronous, no React import. It is called from inside axios callbacks
  *  where hooks may not run, and it is unit-testable without a renderer.
  * =============================================================================
  */
 
-/** The five states, plus PENDING for "the first request has not answered yet".
+/** The six states, plus PENDING for "the first request has not answered yet".
  *  Import these rather than writing the strings — a typo in a comparison
  *  silently selects the READY branch, which draws the chart. */
 export const DATA_STATE = {
     NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
+    FORBIDDEN: 'FORBIDDEN',
     NOT_CONNECTED: 'NOT_CONNECTED',
     NEVER_SYNCED: 'NEVER_SYNCED',
     READY: 'READY',
@@ -69,6 +89,7 @@ export const DATA_STATE = {
  *  always preferred: it is the one that names the variable or the endpoint. */
 const FALLBACK_REASON = {
     NOT_IMPLEMENTED: 'This backend does not serve that endpoint yet.',
+    FORBIDDEN: 'Your role does not include the permission this section needs.',
     NOT_CONNECTED: 'The data source for this view could not be reached.',
     NEVER_SYNCED: 'No sync has completed yet, so this window has no answer — which is not the same as an answer of zero.',
     ERROR: 'The request failed.'
@@ -141,7 +162,7 @@ const _looksLikeRefusal = (resp) => {
 };
 
 /**
- * Decodes any growth-intel service response into one of the five states.
+ * Decodes any growth-intel service response into one of the six states.
  *
  * NEVER DEFAULT `data` TO `{}` OR `[]` AT A CALL SITE. That is the bug. The
  * shape returned here always has a `data` key so destructuring is safe, but it
@@ -163,15 +184,17 @@ const _looksLikeRefusal = (resp) => {
  *   evidence against the heading went with it. Discriminate on `data_state` inside the hook and let
  *   a measured empty decode READY. Return true to force NEVER_SYNCED.
  * @returns {{state: String, data: Object|null, reason: String, endpoint: String|null,
- *   notImplemented: Boolean, ready: Boolean}} `ready` is provided so a caller can guard with one
- *   boolean without importing DATA_STATE.
+ *   permission: String|null, notImplemented: Boolean, ready: Boolean}} `ready` is provided so a
+ *   caller can guard with one boolean without importing DATA_STATE. `permission` is the key a
+ *   FORBIDDEN answer named, and null in every other state.
  */
 export const readDataState = (resp, opts = {}) => {
-    const _out = (state, data, reason, endpoint = null) => ({
+    const _out = (state, data, reason, endpoint = null, permission = null) => ({
         state,
         data: state === DATA_STATE.READY ? data : null,
         reason,
         endpoint,
+        permission: state === DATA_STATE.FORBIDDEN ? permission : null,
         notImplemented: state === DATA_STATE.NOT_IMPLEMENTED,
         ready: state === DATA_STATE.READY
     });
@@ -197,7 +220,20 @@ export const readDataState = (resp, opts = {}) => {
         return _out(DATA_STATE.ERROR, null, FALLBACK_REASON.ERROR);
     }
 
-    // 4. status:false — a refusal (name the variable) or a failure (name the log).
+    // 4. The role does not include this endpoint's permission. BEFORE the refusal heuristic below,
+    //    which would file a 403 (status:false, a message, a non-empty error) as ERROR. Not gated on
+    //    `status`: a payload that says FORBIDDEN is withheld whatever else it says.
+    if (isForbiddenResponse(resp)) {
+        return _out(
+            DATA_STATE.FORBIDDEN,
+            null,
+            resp.msg || FALLBACK_REASON.FORBIDDEN,
+            null,
+            forbiddenPermissionOf(resp)
+        );
+    }
+
+    // 5. status:false — a refusal (name the variable) or a failure (name the log).
     if (resp.status !== true) {
         const refused = _looksLikeRefusal(resp);
         return _out(
@@ -207,7 +243,7 @@ export const readDataState = (resp, opts = {}) => {
         );
     }
 
-    // 5. A success. It may still be carrying "we have not measured this yet".
+    // 6. A success. It may still be carrying "we have not measured this yet".
     //
     // `resp.data` is read WITHOUT a `|| {}` default, which is the whole point of this file. An
     // earlier draft wrote `const data = resp.data || {}` — and that one expression reintroduces the
@@ -262,6 +298,7 @@ export const pendingDataState = () => ({
     data: null,
     reason: '',
     endpoint: null,
+    permission: null,
     notImplemented: false,
     ready: false
 });

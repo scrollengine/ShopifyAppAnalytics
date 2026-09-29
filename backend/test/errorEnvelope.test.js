@@ -319,6 +319,57 @@ test('a non-integer or out-of-range status on a thrown error does not crash the 
     }
 });
 
+test(' a malformed body is logged by CLASS only — never the parser\'s message, stack or body, which quote it', async () => {
+    // Seen live: `"msg": "Unexpected token 'S', ...\"password\":SMOKEPROBE\"... is not valid JSON"` at
+    // ERROR, with a full stack — a fragment of a password in the log for every malformed sign-in.
+    const logger = require(path.join(BACKEND_ROOT, 'src', 'core', 'logger'));
+    const lines = [];
+    const originals = { customConsoleError: logger.customConsoleError, customConsoleWarn: logger.customConsoleWarn };
+    for (const level of Object.keys(originals)) {
+        logger[level] = (message, payload) => lines.push(`${level} ${message} ${JSON.stringify(payload)}`);
+    }
+    const app = express();
+    app.use(express.json({ limit: '1kb' }));
+    app.post('/probe', (_req, res) => res.json({ ok: true }));
+    app.use(terminalErrorHandler);
+    const server = await new Promise((resolve) => {
+        const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    try {
+        const url = `http://127.0.0.1:${server.address().port}/probe`;
+        const malformed = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"email":"a@b.c","password":SMOKEPROBE"}' });
+        assert.equal(malformed.status, 400);
+        const oversized = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: `SMOKEPROBE${'x'.repeat(2048)}` }) });
+        assert.equal(oversized.status, 413);
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+        Object.assign(logger, originals);
+    }
+    assert.equal(lines.length, 2, `expected one log line per failed body, got: ${lines.join(' | ')}`);
+    for (const line of lines) {
+        assert.equal(line.includes('SMOKEPROBE'), false, `A log line quoted the request body: ${line}`);
+        assert.match(line, /^customConsoleWarn WARN: request body could not be read/);
+    }
+    assert.match(lines[0], /entity\.parse\.failed/);
+    assert.match(lines[1], /entity\.too\.large/);
+
+    // A server fault keeps its full ERROR line: the operator needs the message and the stack.
+    const captured = [];
+    logger.customConsoleError = (message, payload) => captured.push(payload);
+    try {
+        terminalErrorHandler(new Error('the database fell over'), {}, { headersSent: false, status() {
+            return this;
+        }, json() {
+            return this;
+        } }, () => {});
+    } finally {
+        Object.assign(logger, originals);
+    }
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].msg, 'the database fell over');
+    assert.ok(captured[0].stack);
+});
+
 test('an error arriving after the headers are flushed destroys the socket rather than appending', () => {
     // A streamed or already-sent response cannot be given an envelope. Appending JSON to a
     // half-sent body corrupts whatever the client already parsed.

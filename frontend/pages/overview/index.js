@@ -5,13 +5,15 @@ import { useRouter } from 'next/router';
 import SideNavBar from '../../components/sideNavBar';
 import LoaderContext from '../../contexts/loaderContext';
 import { APPS_STATE, useGrowthIntel } from '../../contexts/growthIntelContext';
+import { useSession } from '../../contexts/sessionContext';
 import GrowthIntelPartnerAppApiService from '../../API_Services/growth-intel/partnerAppService';
 import AppKpiCards from '../../components/growth-intel/AppKpiCards';
 import InstallTrendSection from '../../components/growth-intel/InstallTrendSection';
 import KpiWarningsCard from '../../components/growth-intel/KpiWarningsCard';
 import DataStateSection from '../../components/growth-intel/DataStateSection';
 import { pendingDataState, readDataState } from '../../components/growth-intel/dataState';
-import { DASHBOARD_ROUTES, REVENUE_VIEWS, revenueViewHref } from '../../utils/dashboardRoutes';
+import { ADMIN_ROUTES, DASHBOARD_ROUTES, REVENUE_VIEWS, revenueViewHref } from '../../utils/dashboardRoutes';
+import { PERMISSIONS, canViewPage } from '../../utils/permissions';
 
 /**
  * =============================================================================
@@ -20,9 +22,11 @@ import { DASHBOARD_ROUTES, REVENUE_VIEWS, revenueViewHref } from '../../utils/da
  *
  *  Installs, uninstalls, reinstalls and gross revenue for the selected partner
  *  app: the rolling window, the all-time totals, the caveats that qualify them,
- *  and the install trend behind them. It is the post-login landing screen
- *  (`pages/index.js` and `pages/login.js` both point here), and it is the parent
- *  route a reader lands on when they trim a path back.
+ *  and the install trend behind them. It is the post-login landing screen for
+ *  every role that holds `financials:read` (`landingRouteFor` in
+ *  `utils/permissions.js` picks the first page in nav order a role can open, and
+ *  this is first), and it is the parent route a reader lands on when they trim a
+ *  path back.
  *
  *  ── WHY THESE FIGURES MOVED HERE ────────────────────────────────────────────
  *  They used to be visible only at the FOOT OF THE PARTNER APPS SETUP SCREEN,
@@ -121,6 +125,11 @@ const KPI_PERIOD_DAYS = 30;
  * The descriptions say what each page ANSWERS, which is the whole reason this list earns its place
  * next to a nav that already carries the labels. None of them claims anything about whether the data
  * is there: that is a fact each page reads from its own endpoint on open.
+ *
+ * `route` is the PAGE an entry opens and `href` is the exact link (a Revenue TAB carries `?view=`).
+ * The list is filtered by `canViewPage(permissions, route)` — the same predicate as the nav and the
+ * page gate in `_app.js` — so a card never links to a page that would answer "Restricted". A group
+ * left with no entries is not drawn.
  */
 const SECTION_CONTENTS = [
     {
@@ -130,31 +139,37 @@ const SECTION_CONTENTS = [
             {
                 title: 'Funnel',
                 desc: 'Views → install clicks → installs → trial → paid, with the install cohort behind it.',
+                route: DASHBOARD_ROUTES.FUNNEL,
                 href: DASHBOARD_ROUTES.FUNNEL
             },
             {
                 title: 'Traffic Sources',
                 desc: 'Where installs come from — channel and medium attribution, plus a country breakdown.',
+                route: DASHBOARD_ROUTES.TRAFFIC_SOURCES,
                 href: DASHBOARD_ROUTES.TRAFFIC_SOURCES
             },
             {
                 title: 'Trial Funnel',
                 desc: 'Trial outcomes over time: how many converted, how many lapsed, and how quickly.',
+                route: DASHBOARD_ROUTES.TRIAL_FUNNEL,
                 href: DASHBOARD_ROUTES.TRIAL_FUNNEL
             },
             {
                 title: 'Logo Churn',
                 desc: 'Customer counts in and out — stores gained and lost, regardless of what they paid.',
+                route: DASHBOARD_ROUTES.LOGO_CHURN,
                 href: DASHBOARD_ROUTES.LOGO_CHURN
             },
             {
                 title: 'Stores',
                 desc: 'Every store that has installed the app, whether or not it ever subscribed.',
+                route: DASHBOARD_ROUTES.STORES,
                 href: DASHBOARD_ROUTES.STORES
             },
             {
                 title: 'Subscriptions',
                 desc: 'Stores paying right now, with plan, state and acquisition channel.',
+                route: DASHBOARD_ROUTES.SUBSCRIPTIONS,
                 href: DASHBOARD_ROUTES.SUBSCRIPTIONS
             },
             /*
@@ -175,16 +190,19 @@ const SECTION_CONTENTS = [
             {
                 title: 'Revenue',
                 desc: 'MRR, ARPU and the lifetime ledger as of the last sync, with the movement drill-down.',
+                route: DASHBOARD_ROUTES.REVENUE,
                 href: revenueViewHref(REVENUE_VIEWS.REVENUE)
             },
             {
                 title: 'Revenue by country',
                 desc: 'Paying customers and revenue by country, with the unattributed remainder shown. Lifetime — this one takes no date range.',
+                route: DASHBOARD_ROUTES.REVENUE,
                 href: revenueViewHref(REVENUE_VIEWS.COUNTRIES)
             },
             {
                 title: 'Revenue churn',
                 desc: 'Money in and out — new, expansion, contraction and churned MRR by month.',
+                route: DASHBOARD_ROUTES.REVENUE,
                 href: revenueViewHref(REVENUE_VIEWS.CHURN)
             }
         ]
@@ -196,12 +214,26 @@ const SECTION_CONTENTS = [
             {
                 title: 'Partner Apps',
                 desc: 'Register the app this install reports on, and choose which one every page is scoped to.',
+                route: DASHBOARD_ROUTES.APPS,
                 href: DASHBOARD_ROUTES.APPS
             },
             {
                 title: 'Sync',
                 desc: 'Run a Partner API sync, watch the job history, and see how far back the data reaches.',
+                route: DASHBOARD_ROUTES.SYNC,
                 href: DASHBOARD_ROUTES.SYNC
+            }
+        ]
+    },
+    {
+        key: 'administration',
+        title: 'Administration',
+        pages: [
+            {
+                title: 'Users & roles',
+                desc: 'Who can sign in, what each role may see and do, pending invitations, and the security activity log.',
+                route: ADMIN_ROUTES.USERS,
+                href: ADMIN_ROUTES.USERS
             }
         ]
     }
@@ -219,6 +251,7 @@ const GrowthIntelOverviewPage = () => {
     const router = useRouter();
     const { toastMarkup } = useContext(LoaderContext) || {};
     const { apps, appId, appsState, appsError, hydrated, refreshApps } = useGrowthIntel();
+    const { permissions, can } = useSession();
 
     /**
      * The DECODED KPI envelope, never the raw payload.
@@ -313,11 +346,17 @@ const GrowthIntelOverviewPage = () => {
             </Banner>
         );
     } else if (appsState === APPS_STATE.READY && apps.length === 0) {
+        // Registering needs `apps:manage`. A role without it is told who can, rather than handed a
+        // step it would be refused at — the Partner Apps page says the same thing in its own words.
+        let nextStep = 'Register the app this install reports on, then run the first sync.';
+        if (!can(PERMISSIONS.APPS_MANAGE)) {
+            nextStep = 'Registering one is for an Owner or Admin: ask one to register the app this install reports on and run the first sync.';
+        }
         rosterBanner = (
             <Banner tone="warning" title="No partner app is registered">
                 <p>
                     Every figure in this dashboard is read out of the Partner API history for a single app id, and
-                    there is no default. Register the app this install reports on, then run the first sync.
+                    there is no default. {nextStep}
                 </p>
                 <Box paddingBlockStart="200">
                     {/* InlineStack, not the surrounding stack: a Button dropped straight into a
@@ -376,7 +415,18 @@ const GrowthIntelOverviewPage = () => {
     // ── The way on to everything else ────────────────────────────────────────────────────────
     // `router.push`, not a Polaris `Link`: no `linkComponent` is configured on the AppProvider, so a
     // Link here would render a plain anchor and reload the whole application on every click.
-    const contentsGroups = SECTION_CONTENTS.map((group, index) => (
+    //
+    // Filtered to what this role opens before anything is drawn, and a group with nothing left is
+    // dropped — so the Divider below is keyed on the position among the VISIBLE groups.
+    const visibleGroups = SECTION_CONTENTS
+        .map((group) => ({
+            key: group.key,
+            title: group.title,
+            pages: group.pages.filter((entry) => canViewPage(permissions, entry.route))
+        }))
+        .filter((group) => group.pages.length > 0);
+
+    const contentsGroups = visibleGroups.map((group, index) => (
         <BlockStack key={group.key} gap="300">
             {index > 0 ? <Divider /> : null}
             <Text as="h3" variant="headingSm">{group.title}</Text>

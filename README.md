@@ -254,17 +254,24 @@ there is no job type for it here.
 
 - A Shopify Partner account with API access — the only hard requirement for **your own** numbers
 - Somewhere to run it, and a database to keep history in
+- A mail server the dashboard can send from — a Gmail account with an app password is enough. The
+  first account is confirmed by email, everyone else joins by emailed invitation, and forgotten
+  passwords are reset by emailed link
 - *Optional:* access to Shopify's listing analytics export, which powers the Funnel page's
   upper steps and all of Traffic Sources
 
 Without the optional piece everything from installs onward still works; the listing-analytics views
 report that they have no data rather than showing zeros.
 
-**[`SETUP.md`](./SETUP.md) is the step-by-step guide** — Docker, the Partner credentials, and the
-full walkthrough for getting a Google BigQuery service-account key and wiring it into a container.
+**[`SETUP.md`](./SETUP.md) is the step-by-step guide** — Docker, the Partner credentials, the mail
+server (including a Gmail app password), and the full walkthrough for getting a Google BigQuery
+service-account key and wiring it into a container.
 
 **To look around first, you need none of it.** `npm run seed:demo` writes a self-consistent fictional
-dataset and every screen fills in. It refuses to run against a database holding a real Partner sync —
+dataset and every screen fills in. You still need an account to sign in with, but not a working mail
+server: `npm run auth:admin -- setup-link` prints the setup link on the terminal instead
+([`DEPLOYMENT.md`](./DEPLOYMENT.md) has the placeholder settings that let the backend boot for a
+demo). It refuses to run against a database holding a real Partner sync —
 it counts what is already there and stops if it finds anything it did not write — and
 `npm run seed:demo:down` removes exactly what it wrote. It also sets the sync watermarks and
 **recomputes the coverage gates from the rows it just wrote**, through the same two files a real sync
@@ -275,8 +282,12 @@ uses, so the demo is honest about itself in the same way the real thing is.
 ## Roadmap
 
 - [x] Ship the dashboard interface alongside the data layer — every screen is built and served
+- [x] Multi-user sign-in — a first-run setup screen for the owner, emailed invitations, built-in
+      and custom roles over a fixed permission catalogue, password reset, a security activity log and
+      a recovery CLI ([`DEPLOYMENT.md`](./DEPLOYMENT.md), "Users, roles and permissions")
 - [ ] One-command quickstart — `docker compose up -d --build` builds and starts the whole stack, but
-      six values still have to be put in `.env` first ([`DEPLOYMENT.md`](./DEPLOYMENT.md))
+      the Partner credentials, a signing secret, the dashboard's address and a mail server still have
+      to be put in `.env` first ([`DEPLOYMENT.md`](./DEPLOYMENT.md))
 - [ ] Extract into a standalone, installable release
 - [ ] Publish inbound contribution terms (DCO or CLA) and open pull requests
 - [x] A demo dataset, so the dashboard is explorable without a Partner account — `npm run seed:demo`
