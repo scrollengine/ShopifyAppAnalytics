@@ -235,8 +235,11 @@ const _verifyOkMessage = (): string => {
  */
 const _withDeadline = (promise: Promise<ServiceResult>, ms: number): Promise<ServiceResult | null> => {
     return new Promise((resolve) => {
+        // Deliberately NOT unref()'d. The timer is cleared the moment the call settles, so it never
+        // outlives `ms`; unref'd, a call that never settles leaves nothing holding the event loop and
+        // this promise is abandoned instead of answering UNCONFIRMED (CI cancelled three mail tests
+        // this way on a clean runner).
         const timer = setTimeout(() => resolve(null), ms);
-        timer.unref();
         promise.then(
             (result) => {
                 clearTimeout(timer);
