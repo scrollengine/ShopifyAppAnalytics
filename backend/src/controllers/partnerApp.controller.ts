@@ -79,7 +79,8 @@ const _failureResponse = (res: Response, serviceResponse: { msg: string; error?:
     if (error && typeof error === 'object' && typeof error.code === 'string') {
         return apiResponse.validationErrorResponse(res, serviceResponse.msg, error);
     }
-    // A caught error. Attached deliberately — this is a single-operator, self-hosted backend.
+    // A caught error. `errorResponseWithErrorObject` reduces it to `{ name, code }` before it reaches
+    // the wire — every signed-in role can call these routes, so nothing more than the class is sent.
     if (error && typeof error === 'object' && Object.keys(error).length > 0) {
         return apiResponse.errorResponseWithErrorObject(res, serviceResponse.msg, error);
     }

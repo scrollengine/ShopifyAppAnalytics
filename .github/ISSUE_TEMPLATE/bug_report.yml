@@ -34,6 +34,7 @@ body:
           label: Which page
           description: The dashboard screen where you saw it. Pick "Not a page" for a backend-only or setup problem.
           options:
+              - Overview
               - Conversion Funnel
               - Traffic Sources
               - Trial Funnel
@@ -45,8 +46,13 @@ body:
               - Revenue Churn
               - Partner Apps
               - Sync
+              - Users & roles (members, invitations, roles, activity)
+              - Account
               - Login
-              - Not a page (backend, Docker, setup)
+              - First-run setup (/setup, /setup/verify)
+              - Accepting an invitation (/accept-invite)
+              - Forgot / reset password
+              - Not a page (backend, Docker, mail, recovery CLI)
       validations:
           required: true
 
@@ -57,7 +63,9 @@ body:
           description: >
               Open your browser's network tab, reload the page, and give the request
               that misbehaved — path and query string. This is usually the single
-              most useful line in the report. Redact nothing except credentials.
+              most useful line in the report. Redact nothing except credentials —
+              and on the setup, invitation and reset pages, remove everything after
+              `#token=` in the address: that part is a live credential.
           placeholder: GET /api/revenue/overview?partner_app_id=...&start=2026-03-01&end=2026-03-31
       validations:
           required: false
@@ -103,7 +111,11 @@ body:
           description: >
               The lines from the backend at the moment it went wrong.
               **Check them for secrets before pasting** — a Partner API token,
-              `JWT_SECRET`, or a service-account key must not go into a public issue.
+              `JWT_SECRET`, `SMTP_PASS` (or a Gmail app password), a service-account
+              key, or a setup / invitation / password-reset link printed by
+              `auth:admin` must not go into a public issue. The backend never logs
+              those itself; this is about what you copy around them. Email
+              addresses do appear in auth log lines — redact them if you prefer.
           render: text
       validations:
           required: false
@@ -119,6 +131,8 @@ body:
               - Running via: Docker compose / npm start / other
               - MongoDB: version, and local or hosted
               - BigQuery listing-analytics tier configured: yes / no
+              - Mail: Gmail / other SMTP server (no credentials, please)
+              - Your role, if the problem is something you could not see or do:
       validations:
           required: true
 
@@ -129,5 +143,5 @@ body:
           options:
               - label: I have checked this is not a security vulnerability (those go by email — see `SECURITY.md`).
                 required: true
-              - label: I have removed any tokens, passwords and keys from everything I pasted above.
+              - label: I have removed any tokens, passwords, keys and emailed links from everything I pasted above.
                 required: true

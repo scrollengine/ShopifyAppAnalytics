@@ -15,8 +15,9 @@
 # ── Secrets ─────────────────────────────────────────────────────────────────
 # This is the line that separates a shareable image from a credential leak.
 #
-# .env holds MONGO_URI (with its password), JWT_SECRET, ADMIN_PASSWORD and
-# SHOPIFY_PARTNER_API_TOKEN — read access to your entire Partner organisation.
+# .env holds MONGO_URI (with its password), JWT_SECRET, SMTP_PASS (a login to a
+# mail account that can send as you) and SHOPIFY_PARTNER_API_TOKEN — read access
+# to your entire Partner organisation.
 # Nothing in the Dockerfile COPYs it by name, but that is not protection: a
 # broad `COPY . .` in some future edit would sweep it in, and once a file is in
 # a layer it is in that layer FOREVER. Deleting it in a later RUN does not

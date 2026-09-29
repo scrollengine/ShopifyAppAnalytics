@@ -28,6 +28,13 @@ import listingGeoDailyModel = require('./listing/listingGeoDaily.model');
 import listingInstallAttributionModel = require('./listing/listingInstallAttribution.model');
 import syncJobModel = require('./sync/syncJob.model');
 import adminUserModel = require('./auth/adminUser.model');
+import systemStateModel = require('./auth/systemState.model');
+import userModel = require('./auth/user.model');
+import roleModel = require('./auth/role.model');
+import inviteModel = require('./auth/invite.model');
+import authTokenModel = require('./auth/authToken.model');
+import authSessionModel = require('./auth/authSession.model');
+import auditEventModel = require('./auth/auditEvent.model');
 
 export = {
     /** The Shopify app this deployment reports on, plus its sync watermarks and coverage gates. */
@@ -52,6 +59,20 @@ export = {
     ListingInstallAttribution: listingInstallAttributionModel.ListingInstallAttribution,
     /** Background runs. This collection is the queue, not a log of one. */
     SyncJob: syncJobModel.SyncJob,
-    /** Operators who may log in to this deployment. */
-    AdminUser: adminUserModel.AdminUser
+    /** LEGACY operator accounts from the single-operator build. Never read by sign-in. */
+    AdminUser: adminUserModel.AdminUser,
+    /** The single install document: the setup lock and the owner pointer. */
+    SystemState: systemStateModel.SystemState,
+    /** People who can sign in. Created only by setup (the owner) or by accepting an invite. */
+    User: userModel.User,
+    /** Custom roles the owner created. Built-in roles live in code. */
+    Role: roleModel.Role,
+    /** Emailed invitations. State is computed from the timestamps, never stored. */
+    Invite: inviteModel.Invite,
+    /** Single-use email-link tokens (setup verification, password reset), stored as sha256 only. */
+    AuthToken: authTokenModel.AuthToken,
+    /** Signed-in sessions; `_id` is the JWT `sid`. Re-read by the guard on every request. */
+    AuthSession: authSessionModel.AuthSession,
+    /** The append-only security activity log. */
+    AuditEvent: auditEventModel.AuditEvent
 };

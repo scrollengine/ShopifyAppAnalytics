@@ -52,6 +52,7 @@ type SecurityHeadersModule = typeof import('../middlewares/securityHeaders');
 type LoginRateLimitModule = typeof import('../middlewares/loginRateLimit');
 type TerminalErrorHandlerModule = typeof import('../middlewares/terminalErrorHandler');
 type AuthModule = typeof import('../modules/auth');
+type MailModule = typeof import('../modules/mail');
 type PartnerModule = typeof import('../modules/partner');
 type SyncModule = typeof import('../modules/sync');
 
@@ -62,13 +63,50 @@ const { bootstrap } = bootstrapModule;
  *
  * Services take an identity and refuse an empty one; at boot there is no request and no session.
  * This is the same named non-human caller device the job runner uses (`SYNC_WORKER`). It grants
- * nothing — there is no per-user scoping anywhere in this system — it only keeps the service
- * signature uniform and makes the caller legible in a log line.
+ * nothing — permissions belong to signed-in users and are checked per route, and boot work passes
+ * through no route — it only keeps the service signature uniform and makes the caller legible in a
+ * log line.
  */
 const BOOT_USER_ID = 'BOOT';
 
 /** Largest JSON body accepted. Nothing here takes bulk input; a login and a few ids is the whole of it. */
 const JSON_BODY_LIMIT = '1mb';
+
+/**
+ * How long a NON-fatal boot step may hold up the rest of boot. Past it the step is left to finish in
+ * the background and boot moves on — a slow datastore must not keep the sync machinery from starting
+ * over bookkeeping that nothing waits for.
+ */
+const NON_FATAL_BOOT_STEP_BUDGET_MS = 30 * 1000;
+
+/**
+ * Waits for a non-fatal boot step, but never longer than `budgetMs`.
+ *
+ * The step is not cancelled on timeout (nothing here can cancel a query); it keeps running and its
+ * own logging still reports how it ended. A rejection counts as "did not finish" — boot steps resolve
+ * by contract, and this keeps a future one that does not from taking boot down.
+ *
+ * @param step - The step's promise.
+ * @param budgetMs - The most boot will wait.
+ * @returns `{ finished: true, value }`, or `{ finished: false }` on timeout or rejection.
+ */
+const _awaitBootStep = <T>(step: Promise<T>, budgetMs: number): Promise<{ finished: true; value: T } | { finished: false }> => {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve({ finished: false }), budgetMs);
+        // A pending budget timer must not be what keeps a shutting-down process alive.
+        timer.unref();
+        step.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve({ finished: true, value: value });
+            },
+            () => {
+                clearTimeout(timer);
+                resolve({ finished: false });
+            }
+        );
+    });
+};
 
 bootstrap().then(async () => {
     // ── Lazy requires: safe only from here down, once dotenv has run ────────
@@ -77,9 +115,16 @@ bootstrap().then(async () => {
     const { registerGracefulShutdown }: ShutdownModule = require('../core/shutdown');
     const routes: RoutesModule = require('../routes');
     const { securityHeaders }: SecurityHeadersModule = require('../middlewares/securityHeaders');
-    const { loginRateLimit, LOGIN_RATE_LIMIT_PATH }: LoginRateLimitModule = require('../middlewares/loginRateLimit');
+    const { loginRateLimit, loginBodyParser, LOGIN_RATE_LIMIT_PATH }: LoginRateLimitModule = require('../middlewares/loginRateLimit');
     const { terminalErrorHandler }: TerminalErrorHandlerModule = require('../middlewares/terminalErrorHandler');
-    const { seedAdminIfMissing }: AuthModule = require('../modules/auth');
+    const {
+        ensureInstallState,
+        markLegacyOperators,
+        ensureAuthIndexes,
+        reconcileSetup,
+        logSetupState
+    }: AuthModule = require('../modules/auth');
+    const { verifyMailAtBoot }: MailModule = require('../modules/mail');
     const { registerPartnerAppFromConfig, runFullSync }: PartnerModule = require('../modules/partner');
     const {
         registerJobHandler,
@@ -99,8 +144,8 @@ bootstrap().then(async () => {
     app.disable('x-powered-by');
 
     // ── Whose address is req.ip ─────────────────────────────────────────────
-    //  SET BEFORE ANY MIDDLEWARE THAT READS AN ADDRESS. The login rate limit
-    // below counts against `req.ip`, and what `req.ip` MEANS is decided entirely here: with this
+    //  SET BEFORE ANY MIDDLEWARE THAT READS AN ADDRESS. The login rate limit below — and the
+    // setup-request and forgot-password limits in routes/auth.routes.ts — count against `req.ip`, and what `req.ip` MEANS is decided entirely here: with this
     // unset, every caller behind the dashboard's server-side proxy resolves to the proxy and shares
     // one budget; set too loosely, a forged `X-Forwarded-For` puts every attempt in a fresh one.
     // The default is Express's `false` because only the second of those failures is silent. Read
@@ -113,15 +158,19 @@ bootstrap().then(async () => {
     app.use(securityHeaders);
 
     // The enforcement behind AUTH_LOGIN_RATE_LIMIT_MAX, on the one unauthenticated endpoint that
-    // takes a credential. Mounted BEFORE the body parser: a refused attempt should not get a
-    // megabyte of JSON parsed on its behalf. `LOGIN_RATE_LIMIT_PATH` has to agree with the mount in
-    // src/routes/index.ts, and test/securityRateLimit.test.js asserts that it still does.
-    app.use(LOGIN_RATE_LIMIT_PATH, loginRateLimit);
+    // checks a password. Mounted BEFORE the general body parser: a refused attempt should not get a
+    // megabyte of JSON parsed on its behalf. The login path's own parser (8 KB) runs first because
+    // the limiter reads the email and device token to find a device's own budget.
+    // `LOGIN_RATE_LIMIT_PATH` has to agree with the mount in src/routes/index.ts, and
+    // test/securityRateLimit.test.js asserts that it still does.
+    app.use(LOGIN_RATE_LIMIT_PATH, loginBodyParser, loginRateLimit);
 
     app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
     //  ONE mount. Everything the internet can reach is decided in src/routes/index.ts, and the
-    // guard lives there — read that file before adding anything to this one.
+    // guard lives there — read that file before adding anything to this one. The other public-flow
+    // limiters are ROUTE-level in routes/auth.routes.ts (the token-flow one needs the parsed body),
+    // so nothing is added to this mount list for them.
     app.use(routes);
 
     // ── THE TERMINAL ERROR HANDLER — mounted LAST, and it must stay last ──────
@@ -152,14 +201,54 @@ bootstrap().then(async () => {
     // process down cleanly instead of killing it outright.
     registerGracefulShutdown(server);
 
-    // ── The operator account ────────────────────────────────────────────────
-    // NON-FATAL by choice. `validateConfig()` has already proven ADMIN_EMAIL and a password are
-    // set, so the only way this fails now is a datastore fault — and in that case /healthz reporting
-    // "degraded" with a reason is more useful than an exit that destroys the signal.
-    const seeded = await seedAdminIfMissing();
-    if (!seeded.status) {
-        customConsoleError('ERROR: boot: could not create the operator account — nobody will be able to sign in', { msg: seeded.msg });
+    // ── Accounts: install state, legacy accounts, auth indexes, setup (spec A8) ──
+    // There is no seeded account. The first person through the setup screen becomes the owner, and
+    // everyone else joins by invitation. These five steps make that state trustworthy before anyone
+    // relies on it, in this order.
+
+    //  FATAL — THROWS into the catch below. The install document is the ONLY record of whether
+    // setup is open; without it the setup screen cannot say "locked", and a database that already
+    // holds users is created LOCKED (never open) by this call. Refusing to start beats guessing.
+    await ensureInstallState();
+
+    // NON-FATAL, bounded. Stamps `legacy_at` on single-operator-build accounts. Sign-in never reads
+    // them, so a failure here costs a provenance stamp, not access. Idempotent.
+    const legacyMarking = await _awaitBootStep(markLegacyOperators(), NON_FATAL_BOOT_STEP_BUDGET_MS);
+    if (!legacyMarking.finished) {
+        customConsoleWarn('WARN: boot: marking legacy operator accounts did not finish in time — continuing; it carries on in the background');
+    } else if (!legacyMarking.value.status) {
+        customConsoleWarn('WARN: boot: could not mark legacy operator accounts — sign-in is unaffected (it never reads them)', { msg: legacyMarking.value.msg });
     }
+
+    //  FATAL — THROWS into the catch below. The unique indexes ARE the gates: one account per email,
+    // one outstanding invitation per address, one use per link. With MONGO_DISABLE_AUTO_INDEX=true
+    // nothing else builds them, and the first insert without them could create a duplicate that no
+    // later index build can repair. Account-creating requests answer 503 until this has succeeded.
+    await ensureAuthIndexes();
+
+    // NON-FATAL, bounded. Rolls a setup that crashed between locking the install and inserting the
+    // owner forward from the claim it left behind (idempotent, so finishing late is harmless). Logs
+    // the recovery command itself when it cannot.
+    const reconciled = await _awaitBootStep(reconcileSetup(), NON_FATAL_BOOT_STEP_BUDGET_MS);
+    if (!reconciled.finished) {
+        customConsoleWarn('WARN: boot: setup reconciliation did not finish in time — continuing; it carries on in the background');
+    } else if (!reconciled.value.status) {
+        customConsoleError('ERROR: boot: setup reconciliation failed — if nobody can sign in, run `npm run auth:admin:dist -- status`', { msg: reconciled.value.msg });
+    }
+
+    // NON-FATAL, bounded. Says once who may claim setup, and WARNs loudly while it is open to whoever
+    // reaches the dashboard first. Logs its own failure.
+    const setupStateLogged = await _awaitBootStep(logSetupState(), NON_FATAL_BOOT_STEP_BUDGET_MS);
+    if (!setupStateLogged.finished) {
+        customConsoleWarn('WARN: boot: could not report the setup state in time — continuing');
+    }
+
+    // NON-FATAL and OFF the critical path: an SMTP server that is slow to answer must not hold up the
+    // sync machinery. The check is bounded inside the mail module and logs its own outcome (a WARN on
+    // failure); the Users page and GET /api/auth/setup report it from there. Not awaited.
+    verifyMailAtBoot().catch((mailError: unknown) => {
+        customConsoleWarn('WARN: boot: the mail check threw — mail state stays "not checked"', mailError);
+    });
 
     // ── The app to report on ────────────────────────────────────────────────
     // NON-FATAL by choice. SHOPIFY_PARTNER_APP_ID is a config WARNING, not a required key, so a

@@ -9,13 +9,14 @@
  *  `/overview` and `/login` are the same shape, and no prefix separates them.
  *
  *  What replaces it is this allowlist. It is the only place the ten paths are
- *  written down, and three separate consumers read it rather than repeating it:
+ *  written down, and four separate consumers read it rather than repeating it:
  *
  *    · `contexts/growthIntelContext.js` — decides whether to fetch the partner-app
  *      roster at all (see the below; this is the dangerous one);
  *    · `components/sideNavBar.js` — the `url` of every nav row and the predicate
  *      that highlights it;
- *    · `pages/overview/index.js` — the contents list the Overview renders.
+ *    · `pages/overview/index.js` — the contents list the Overview renders;
+ *    · `utils/permissions.js` — which permission opens each page.
  *
  *  WHY THE ROSTER GATE MATTERS MORE THAN IT LOOKS. The context fetches the
  *  partner-app list only on a dashboard route, deliberately, so `/` and `/login`
@@ -26,7 +27,16 @@
  *
  *  ⚠️ ADD A PAGE, ADD IT HERE. The directory under `pages/` is what Next routes;
  *  this file is what the app RECOGNISES. They are two lists and only one of them
- *  is enforced by the framework.
+ *  is enforced by the framework. A new page ALSO needs its entry in
+ *  `PAGE_PERMISSIONS` (`utils/permissions.js`): the page gate in `_app.js` is
+ *  default-deny, so a page missing there renders "Restricted" for every role.
+ *
+ *  ⚠️ ADMIN ROUTES ARE DELIBERATELY SEPARATE. `/settings/users` and `/account`
+ *  live in `ADMIN_ROUTES` below, NOT in `DASHBOARD_ROUTES`. They are not scoped
+ *  by a partner app, so they must not open the roster gate: putting them in the
+ *  map below would fetch the partner-app list on every visit to a screen that
+ *  never reads it, and draw the partner-app picker in the nav over a page it
+ *  does not scope.
  *
  *  ── ⚠️ A TAB IS NOT A ROUTE, AND MUST NOT BE ADDED HERE ─────────────────────
  *  `/revenue` carries three views behind one path (see `REVENUE_VIEWS` below).
@@ -73,13 +83,28 @@ export const DASHBOARD_ROUTES = Object.freeze({
 export const DASHBOARD_ROUTE_PATHS = Object.freeze(Object.values(DASHBOARD_ROUTES));
 
 /**
- * Where a signed-in operator lands, and the parent of every other screen.
+ * The parent of every other dashboard screen, and the first one the nav lists.
  *
- * ⚠️ `pages/index.js` and `pages/login.js` BOTH send people here and must not
- * disagree — where you end up would otherwise depend on whether you arrived
- * already signed in. They import this constant so they cannot.
+ * ⚠️ NOT "WHERE A SIGNED-IN USER LANDS" ANY MORE. The Overview needs
+ * `financials:read`, which not every role holds, so a fixed landing screen would
+ * open on "Restricted" for some of them. `pages/index.js` sends people to
+ * `landingRouteFor(permissions)` in `utils/permissions.js` instead — the first
+ * screen in nav order this user can open.
  */
 export const DASHBOARD_HOME = DASHBOARD_ROUTES.OVERVIEW;
+
+/**
+ * The screens that are NOT dashboard screens: not scoped by a partner app, not in
+ * `DASHBOARD_ROUTES`, and never a reason to fetch the partner-app roster. See the
+ * file header on why they must stay out of the map above.
+ *
+ * `/account` is every signed-in user's own page and needs no permission.
+ * `/settings/users` needs `users:read` (see `PAGE_PERMISSIONS`).
+ */
+export const ADMIN_ROUTES = Object.freeze({
+    USERS: '/settings/users',
+    ACCOUNT: '/account'
+});
 
 /**
  * =============================================================================
@@ -183,6 +208,70 @@ export const revenueViewHref = (view) => {
 };
 
 /**
+ * The `?view=` values `/settings/users` understands — the same pattern as
+ * `REVENUE_VIEWS`, for the same reasons: a tab in the URL can be linked to,
+ * bookmarked and shared, and a tab in `useState` cannot.
+ *
+ * ⚠️ THESE STRINGS BECOME PEOPLE'S URLS. Renaming one silently lands every shared
+ * link on the default tab.
+ *
+ * Which tabs a given user may OPEN is not decided here: Activity needs
+ * `audit:read`, and the page itself filters the strip. This file only knows which
+ * views exist.
+ */
+export const USERS_VIEWS = Object.freeze({
+    MEMBERS: 'members',
+    INVITES: 'invites',
+    ROLES: 'roles',
+    ACTIVITY: 'activity'
+});
+
+/** The tab order, left to right. */
+export const USERS_VIEW_ORDER = Object.freeze([
+    USERS_VIEWS.MEMBERS,
+    USERS_VIEWS.INVITES,
+    USERS_VIEWS.ROLES,
+    USERS_VIEWS.ACTIVITY
+]);
+
+/** What `/settings/users` opens on with no `?view=`. */
+export const DEFAULT_USERS_VIEW = USERS_VIEWS.MEMBERS;
+
+/**
+ * Resolve a raw `router.query.view` to one of the Users views. Anything that is
+ * not exactly one of them becomes the default, for the reasons given on
+ * {@link normaliseRevenueView}.
+ *
+ * @param {String|Array|undefined} view - `router.query.view`, exactly as Next hands it over.
+ * @returns {String} One of `USERS_VIEWS`.
+ */
+export const normaliseUsersView = (view) => {
+    if (typeof view !== 'string') {
+        return DEFAULT_USERS_VIEW;
+    }
+    if (USERS_VIEW_ORDER.includes(view)) {
+        return view;
+    }
+    return DEFAULT_USERS_VIEW;
+};
+
+/**
+ * The href for one view of the Users page. The default view gets a bare
+ * `/settings/users` — one canonical URL per view, as {@link revenueViewHref}
+ * explains.
+ *
+ * @param {String} view - One of `USERS_VIEWS`.
+ * @returns {String} A path this app can `router.push`.
+ */
+export const usersViewHref = (view) => {
+    const resolved = normaliseUsersView(view);
+    if (resolved === DEFAULT_USERS_VIEW) {
+        return ADMIN_ROUTES.USERS;
+    }
+    return `${ADMIN_ROUTES.USERS}?view=${resolved}`;
+};
+
+/**
  * Is `pathname` this route, or a page nested under it?
  *
  * THE TRAILING SLASH IS THE WHOLE POINT, and it is not decoration.
@@ -201,7 +290,7 @@ export const revenueViewHref = (view) => {
  * `router.pathname` is `/revenue` on every tab, which is exactly why one nav row
  * lights for all three views with no special case anywhere.
  *
- * @param {String} route - One of `DASHBOARD_ROUTES`.
+ * @param {String} route - One of `DASHBOARD_ROUTES` or `ADMIN_ROUTES`.
  * @param {String} pathname - `router.pathname` (the PATTERN, so `/subscriptions/[key]`, not the filled-in URL).
  * @returns {Boolean}
  */

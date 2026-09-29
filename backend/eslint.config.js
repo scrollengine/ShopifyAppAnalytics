@@ -9,11 +9,15 @@
  *  single quotes, semicolons and brace style and AUTOFIXES them; it never
  *  reflows your lines. Where you break a chain or a long expression is yours.
  *
- *  The one rule here that is architecture rather than style is the LAYER GUARD
- *  at the bottom: `src/models/**` may be imported ONLY from a `repositories/`
- *  folder. That is what keeps the data layer from leaking into services,
- *  helpers and controllers, and it is enforced across all three import forms
- *  this codebase actually uses (see the comment on the guard).
+ *  Two rules here are architecture rather than style:
+ *
+ *    - the LAYER GUARD: `src/models/**` may be imported ONLY from a
+ *      `repositories/` folder. That is what keeps the data layer from leaking
+ *      into services, helpers and controllers, and it is enforced across all
+ *      three import forms this codebase actually uses (see the comment on it).
+ *    - the LINK-ORIGIN GUARD: TypeScript under src/ may not read the request's
+ *      idea of its own address (Host, protocol, X-Forwarded-*). Email links are
+ *      built from `config.APP.PUBLIC_URL` alone (see the comment on it).
  *
  *  Install:  npm i
  *  Run:      npm run lint   /   npm run lint:fix
@@ -72,6 +76,57 @@ const RESTRICTED_MODEL_SYNTAX = [
         // `export =` modules, and the one a plain no-restricted-imports misses.
         selector: `TSExternalModuleReference > Literal[value=${MODEL_PATH_RE}]`,
         message: MODEL_IMPORT_MESSAGE
+    }
+];
+
+// ---------------------------------------------------------------------------
+//  The link-origin guard.
+// ---------------------------------------------------------------------------
+//  Setup, invitation and password-reset links are built from
+//  `config.APP.PUBLIC_URL` and from nothing the request says about itself. The
+//  Host header, the protocol and every X-Forwarded-* header are written by
+//  whoever sends the request, so a reset link built from them points wherever
+//  the sender chooses — and carries the victim's token there when clicked.
+//
+//  `req.get()` and `req.header()` are banned outright because their argument
+//  is a runtime string these rules cannot follow. Headers are read as
+//  `req.headers['name']` (e.g. `req.headers['user-agent']`), which the
+//  selectors below CAN see.
+const LINK_ORIGIN_MESSAGE =
+    'Never read the request\'s own address (Host, protocol, X-Forwarded-*): the caller writes it. ' +
+    'Build links from config.APP.PUBLIC_URL only.';
+
+const HEADER_ACCESSOR_MESSAGE =
+    'Read headers as req.headers[\'name\'] so the link-origin guard can see which header is read. ' +
+    'Never read Host or X-Forwarded-* at all — build links from config.APP.PUBLIC_URL.';
+
+const RESTRICTED_REQ_PROPERTIES = [
+    { object: 'req', property: 'hostname', message: LINK_ORIGIN_MESSAGE },
+    { object: 'req', property: 'host', message: LINK_ORIGIN_MESSAGE },
+    { object: 'req', property: 'protocol', message: LINK_ORIGIN_MESSAGE },
+    { object: 'req', property: 'subdomains', message: LINK_ORIGIN_MESSAGE },
+    { object: 'req', property: 'get', message: HEADER_ACCESSOR_MESSAGE },
+    { object: 'req', property: 'header', message: HEADER_ACCESSOR_MESSAGE }
+];
+
+//  Appended to the SAME no-restricted-syntax array as the model guard: ESLint
+//  replaces a rule's options wholesale, so a second config object setting this
+//  rule would silently switch one of the two guards off.
+const RESTRICTED_HOST_SYNTAX = [
+    {
+        // req.headers.host
+        selector: `MemberExpression[object.object.name='req'][object.property.name='headers'][property.name='host']`,
+        message: LINK_ORIGIN_MESSAGE
+    },
+    {
+        // req.headers['host']
+        selector: `MemberExpression[object.object.name='req'][object.property.name='headers'][property.value='host']`,
+        message: LINK_ORIGIN_MESSAGE
+    },
+    {
+        // req.headers['x-forwarded-host'], req.headers['x-forwarded-proto'], ...
+        selector: `MemberExpression[object.object.name='req'][object.property.name='headers'][property.value=/^[Xx]-[Ff]orwarded-/]`,
+        message: LINK_ORIGIN_MESSAGE
     }
 ];
 
@@ -210,7 +265,12 @@ module.exports = [
                     message: MODEL_IMPORT_MESSAGE
                 }]
             }],
-            'no-restricted-syntax': ['error', ...RESTRICTED_MODEL_SYNTAX]
+            // Also carries the link-origin selectors: ONE array for both
+            // guards (see RESTRICTED_HOST_SYNTAX for why).
+            'no-restricted-syntax': ['error', ...RESTRICTED_MODEL_SYNTAX, ...RESTRICTED_HOST_SYNTAX],
+
+            // ---- The link-origin guard ----
+            'no-restricted-properties': ['error', ...RESTRICTED_REQ_PROPERTIES]
         }
     },
 
@@ -221,6 +281,10 @@ module.exports = [
     //
     // Ordering matters: flat config merges every matching block in order, so
     // this must come AFTER the `**/*.ts` block it narrows.
+    //
+    // Turning no-restricted-syntax off here also drops the link-origin
+    // selectors for these files. That costs nothing: a repository or a schema
+    // never holds a request. no-restricted-properties stays on everywhere.
     {
         files: ['src/**/repositories/**/*.ts', 'src/models/**/*.ts'],
         rules: {

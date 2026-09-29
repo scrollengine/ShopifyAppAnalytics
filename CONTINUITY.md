@@ -23,16 +23,17 @@ Every figure below came from the command beside it. Re-run them rather than beli
 
 | | | command |
 |---|---|---|
-| endpoints | **38** | `grep -hcE 'router\.(get\|post\|put\|patch\|delete)\(' backend/src/routes/*.routes.ts` + `/healthz` |
-| backend tests | **578 / 0 fail**, 27 suites | `cd backend && npm test` |
-| TypeScript files | **248** | `find backend/src -name '*.ts' \| wc -l` |
-| modules | **8** | `ls -d backend/src/modules/*/` |
-| collections | **9** (`gi_*`) | `ls backend/src/models/**/*.model.ts` |
-| dashboard pages | **11** | `find frontend/pages -name index.js` |
-| nav rows | **10** | `grep -c 'url: DASHBOARD_ROUTES' frontend/components/sideNavBar.js` |
+| endpoints | **66** — 10 public, 56 guarded | `grep -hcE 'router\.(get\|post\|put\|patch\|delete)\(' backend/src/routes/*.routes.ts` + `/healthz` |
+| backend tests | **745 / 0 fail**, 39 suites | `cd backend && npm test` |
+| TypeScript files | **313** | `find backend/src -name '*.ts' \| wc -l` |
+| modules | **9** | `ls -d backend/src/modules/*/` |
+| collections | **16** (`gi_*`) | `ls backend/src/models/*/*.model.ts` |
+| permissions / built-in roles | **12** / **4** | `backend/src/modules/auth/constants/permissions.constants.ts`, `roles.constants.ts` |
+| frontend pages | **19** — 10 dashboard, Users & roles, Account, 6 public, and `/` | `find frontend/pages -name '*.js' ! -name '_*' \| wc -l` |
+| nav rows | **11** | `grep -cE 'url: (DASHBOARD\|ADMIN)_ROUTES' frontend/components/sideNavBar.js` |
 | unimplemented service methods | **1** | `grep -rc 'notImplemented({' frontend/API_Services/growth-intel/*.js` |
 | import cycles | **0** | see §2 |
-| middlewares | **4** | `ls backend/src/middlewares/*.ts` |
+| middlewares | **6** | `ls backend/src/middlewares/*.ts` |
 | frontend `npm audit` | **0 vulnerabilities** | `cd frontend && npm audit` |
 
 That single remaining stub is **correct, not a gap**: `syncService.triggerSync` refuses job types the
@@ -51,16 +52,16 @@ Run all of it before believing the build is healthy. Several defects here are in
 cd backend
 npm run typecheck                 # expect: no output
 npm run lint                      # expect: 0 errors (12 pre-existing max-len warnings)
-npm test                          # expect: 578 pass / 0 fail
+npm test                          # expect: 745 pass / 0 fail
 
 # frontend
 cd ../frontend
 npx eslint pages components API_Services contexts utils   # expect: 5 errors (see below)
-rm -rf .next && npx next build --no-lint; echo "exit=$?"  # expect: exit=0, 13 routes
+rm -rf .next && npx next build --no-lint; echo "exit=$?"  # expect: exit=0
 ```
 
-The five frontend eslint errors are **pre-existing and unrelated to any recent change** — three
-`react/no-unescaped-entities` (a `"` and `'` inside copy in `CohortRetentionHeatmap.js` and
+The five frontend eslint errors are **pre-existing and unrelated to any recent change** — four
+`react/no-unescaped-entities` (`"` and `'` inside copy in `CohortRetentionHeatmap.js` and
 `ConversionFunnelChart.js`) and one `react/display-name` in `cardShell.js`. They do not fail the
 build, which is why they survived. Fix them or don't, but do not read "5 errors" as a regression.
 
@@ -73,7 +74,7 @@ failing tests:
 
 ```bash
 cd backend
-for m in auth partner revenue bigquery sync store conversion; do
+for m in auth mail partner revenue bigquery sync store conversion; do
   node -r ts-node/register/transpile-only -e "require('./src/modules/$m/index.ts')" 2>&1 \
     | grep -q circular && echo "CYCLE in $m"
 done
@@ -97,18 +98,23 @@ use `npm test`, or `node -r ts-node/register/transpile-only --test test/foo.test
 3. **Leave `TRUST_PROXY` unset unless a real reverse proxy is in front.** Measured against
    `proxy-addr`: behind the bundled compose stack the dashboard forwards a caller-supplied
    `X-Forwarded-For` unchanged, so `uniquelocal` there lets a caller pick their own rate-limit
-   bucket. It is correct *only* behind the nginx recipe in `DEPLOYMENT.md`, whose
-   `$proxy_add_x_forwarded_for` appends the true peer. Unset means one shared bucket — stricter, and
-   no longer a lockout now that a spent budget trickles.
-4. **Consider `ADMIN_PASSWORD_HASH`** instead of the plaintext `ADMIN_PASSWORD` in `.env`. Both files
-   are git-ignored, so nothing is exposed; the hash simply keeps the password out of `ps`, shell
-   history and `docker inspect`.
+   bucket — for sign-in, forgot-password and the setup request alike. It is correct *only* behind the
+   nginx recipe in `DEPLOYMENT.md`, whose `$proxy_add_x_forwarded_for` appends the true peer. Unset
+   means one shared bucket per limiter — stricter. A returning user signs in on their browser's own
+   device budget whatever the flood; a first sign-in from a new browser shares the bucket and its
+   trickle, which a caller who keeps polling can hold. (The emailed-link limiter is keyed on the
+   token and does not care.)
+4. **Move a running install onto multi-user sign-in** — `DEPLOYMENT.md`, "Upgrading from a
+   single-operator build": set `APP_PUBLIC_URL` and the `SMTP_*` settings (and `SETUP_OWNER_EMAIL`
+   if the old `ADMIN_EMAIL` is not a mailbox you read) **before** pulling, claim setup, and delete the
+   `ADMIN_*` lines once you are sure you will not roll back. On a fresh install, set
+   `SETUP_OWNER_EMAIL` before the first boot.
 
 ---
 
 ## 4. What is worth doing next
 
-Ranked. Nothing here is required for the product to work — all eleven screens do.
+Ranked. Nothing here is required for the product to work — every screen does.
 
 ### 4.1 Render the evidence the payloads already carry
 
@@ -167,6 +173,21 @@ switch otherwise reads as a 12× upgrade.
   JS is not. `next/dynamic` would trim it.
 - **Naming.** `/countries` and `/apps` do not match their nav labels ("Revenue Country",
   "Partner Apps"). The generic `/growth-intel/*` redirects already cover renames.
+
+### 4.5 Sign-in follow-ups
+
+The auth work shipped with its gaps written down in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) §7.
+The ones worth doing first:
+
+- **A nonce-based Content-Security-Policy for the dashboard.** It sends only `frame-ancestors`; the
+  public pages hold link tokens and passwords, which is exactly where a script policy earns its keep.
+- **The token-flow limiter's global budget** can be spent by an anonymous caller posting random
+  well-formed tokens, after which setup completion, invitation acceptance and reset admit one request
+  per 30 s for everyone until the window rolls.
+- **A mail check in the recovery CLI** (`status` says whether mail is configured, never whether it
+  works).
+- **No browser pass has been run** over the setup, invitation, reset, Account and Users & roles
+  screens; their behaviour is covered by backend tests and the pages' own review, not by a click-through.
 
 ---
 

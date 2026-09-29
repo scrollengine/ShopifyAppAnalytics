@@ -4,8 +4,15 @@ import { useRouter } from 'next/router';
 import LoaderContext from '../../contexts/loaderContext';
 import GrowthIntelPartnerAppApiService from '../../API_Services/growth-intel/partnerAppService';
 import { DASHBOARD_ROUTES } from '../../utils/dashboardRoutes';
+import { isForbiddenResponse } from '../../utils/permissions';
 
 const API = new GrowthIntelPartnerAppApiService();
+
+/** Shown on a 401; the redirect to /login is already under way. */
+const SESSION_EXPIRED_MESSAGE = 'Your session has expired. Please sign in again.';
+
+/** Shown on a 403 whose envelope carried no message of its own. */
+const FORBIDDEN_FALLBACK_MESSAGE = 'Your role does not allow registering or editing partner apps.';
 
 const _emptyForm = {
     display_name: '',
@@ -27,10 +34,19 @@ const _arrayToCsv = (a) => Array.isArray(a) ? a.join(', ') : '';
  * @param {Object} [props.initial] - Initial app values when editing (omit for create mode).
  * @param {String} [props.mode='create'] - 'create' or 'edit'.
  * @param {Function} [props.onSaved] - Called with the saved app doc after success.
+ * @param {Boolean} [props.disabled] - Blocks saving. The fields stay readable.
+ * @param {String} [props.disabledReason] - Why — usually that the role lacks `apps:manage`. Printed
+ *   under the buttons; required whenever `disabled` is true, because a dead Save with no reason reads
+ *   as a broken form.
+ *
+ * A refusal says what it is: 401 → the session expired (the redirect is under way); 403 → the
+ * server's own sentence, which names the permission. It used to say "Permission denied. Please log
+ * in as super admin." for both — an account type this build never had.
  */
-const PartnerAppForm = ({ initial, mode, onSaved }) => {
+const PartnerAppForm = ({ initial, mode, onSaved, disabled, disabledReason }) => {
     const router = useRouter();
     const { showToast } = useContext(LoaderContext) || {};
+    const blocked = disabled === true;
     const _mode = mode || 'create';
     const _isEdit = _mode === 'edit';
 
@@ -54,6 +70,7 @@ const PartnerAppForm = ({ initial, mode, onSaved }) => {
     const set = (key) => (value) => setForm((f) => ({ ...f, [key]: value }));
 
     const handleSubmit = useCallback(() => {
+        if (blocked) { return; }
         if (!form.display_name) { showToast && showToast('Display name is required.', true); return; }
         if (!form.app_handle) { showToast && showToast('App handle is required.', true); return; }
         if (!form.listing_url) { showToast && showToast('Listing URL is required.', true); return; }
@@ -74,8 +91,16 @@ const PartnerAppForm = ({ initial, mode, onSaved }) => {
         setSaving(true);
         const cb = (resp) => {
             setSaving(false);
-            if (!resp || resp.resource_access === 'NOT_ALLOWED') {
-                showToast && showToast('Permission denied. Please log in as super admin.', true);
+            if (resp && resp.resource_access === 'NOT_ALLOWED') {
+                showToast && showToast(SESSION_EXPIRED_MESSAGE, true);
+                return;
+            }
+            if (isForbiddenResponse(resp)) {
+                showToast && showToast(resp.msg || FORBIDDEN_FALLBACK_MESSAGE, true);
+                return;
+            }
+            if (!resp) {
+                showToast && showToast('Save failed.', true);
                 return;
             }
             if (!resp.status) {
@@ -96,7 +121,12 @@ const PartnerAppForm = ({ initial, mode, onSaved }) => {
         } else {
             API.create(body, cb);
         }
-    }, [form, _isEdit, initial, onSaved, router, showToast]);
+    }, [blocked, form, _isEdit, initial, onSaved, router, showToast]);
+
+    let blockedNote = null;
+    if (blocked && disabledReason) {
+        blockedNote = <Text as="span" variant="bodySm" tone="caution">{disabledReason}</Text>;
+    }
 
     return (
         <Card>
@@ -159,11 +189,12 @@ const PartnerAppForm = ({ initial, mode, onSaved }) => {
                     />
                 </FormLayout>
                 <InlineStack gap="200">
-                    <Button variant="primary" loading={saving} disabled={saving} onClick={handleSubmit}>
+                    <Button variant="primary" loading={saving} disabled={saving || blocked} onClick={handleSubmit}>
                         {_isEdit ? 'Save changes' : 'Create partner app'}
                     </Button>
                     <Button onClick={() => router.push(DASHBOARD_ROUTES.APPS)}>Cancel</Button>
                 </InlineStack>
+                {blockedNote}
             </BlockStack>
         </Card>
     );

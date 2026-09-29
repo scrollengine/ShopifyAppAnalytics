@@ -1,32 +1,25 @@
 import { Schema, model } from 'mongoose';
 
 /**
- * An operator who may log in to this deployment.
+ * LEGACY — an operator account from the single-operator build (v0.1). NEVER READ BY SIGN-IN.
  *
- * There is no self-registration and no tenancy: this is a self-hosted tool, and everyone with a row
- * here sees the same single app's analytics. Accounts are created by whoever runs the deployment.
+ * Sign-in, sessions and permissions now live in `gi_users` (see `./user.model`). This collection is
+ * kept for provenance and for exactly two reads:
  *
- * ─────────────────────────────────────────────────────────────────────────────────────────────
- *  NO PASSWORD-HASHING HOOK ON THIS SCHEMA, ON PURPOSE.
+ *  1. Setup restriction. While `SETUP_OWNER_EMAIL` is unset, the emails on these rows are the only
+ *     addresses that may claim first-run setup — so upgrading an existing install does not hand
+ *     the owner account to whoever reaches `/setup` first.
+ *  2. Boot marking. `markLegacyOperators()` stamps `legacy_at` on every row at boot, so an operator
+ *     reading the collection can see that the row no longer grants anything.
  *
- * The conventional place to hash is a `pre('save')` hook, and it is a trap here twice over:
+ * Nothing here is migrated into `gi_users`: the v0.1 password was chosen under a weaker policy, and
+ * the new owner proves control of the mailbox before choosing a new one. The rows are not deleted
+ * either, so rolling back to v0.1 (which ignores `legacy_at`) still finds its operator.
  *
- *  1. Mongoose 9 pre-hooks take NO `next` callback — they receive the hook's own arguments, so a
- *     hook written `function (next) {…}` binds `next` to the options object and `next()` throws
- *     `next is not a function`. Worse is the callback-style variant that "works": a hook calling a
- *     library's callback API completes the moment it RETURNS, before the callback fires, so the
- *     save proceeds with the field untouched and the PLAINTEXT password is persisted. This is a
- *     well-known Mongoose footgun and not a hypothetical one — it is the reason hashing is an
- *     explicit call here rather than a hook.
- *  2. Even written correctly, a hook makes hashing invisible and conditional — it has to sniff
- *     `isModified` to avoid double-hashing an already-hashed value on an unrelated update.
- *
- * So hashing lives in the auth SERVICE, which is the only writer of `password_hash`: it hashes,
- * then writes an already-hashed value. The model stores a hash and knows nothing about passwords.
- * This whole class of bug is avoided rather than navigated.
- *
- * The field name says `password_hash` rather than `password` for the same reason — a plaintext
- * value assigned here reads as obviously wrong at every call site.
+ * NO PASSWORD-HASHING HOOK, ON PURPOSE (kept from v0.1 and still true of every auth schema here):
+ * Mongoose 9 pre-hooks take no `next` callback, and the callback-style variant that "works"
+ * persists the PLAINTEXT when the hook returns before its callback fires. Hashing is an explicit
+ * call in the auth service, which is the only writer of any `password_hash`.
  */
 
 const _modelName = 'gi_admin_user';
@@ -35,14 +28,8 @@ const _collectionName = 'gi_admin_users';
 const adminUserSchema = new Schema(
     {
         /**
-         * Login identity. Lowercased and trimmed on write so `Alice@x.com` and `alice@x.com ` are
-         * one account rather than two — the uniqueness gate below is only as good as the
-         * normalisation in front of it, since Mongo's default collation is case-SENSITIVE.
-         *
-         * ⚠️ Lookups must normalise the same way (`String(email).trim().toLowerCase()`) before
-         * querying. Mongoose's `lowercase` applies to writes and to query CASTING on this path, but
-         * relying on that silently stops working the moment a lookup goes through an aggregate,
-         * which does not cast.
+         * The v0.1 login identity, stored lowercased and trimmed. Read now only as the setup
+         * allow-list (header, point 1), which compares it against an already-normalised address.
          */
         email: {
             type: String,
@@ -51,29 +38,33 @@ const adminUserSchema = new Schema(
             lowercase: true
         },
         /**
-         * The password hash. Written ONLY by the auth service — see the header note.
+         * The v0.1 bcrypt hash. Nothing in the current build reads or writes it; it stays so a
+         * rollback to v0.1 can still sign its operator in.
          *
-         * ⚠️ `select: false`, so it is absent from every ordinary read and cannot be leaked by an
-         * endpoint that returns a user object it did not shape. The login path — the one place that
-         * needs it — must ask for it explicitly:
-         *
-         *     AdminUser.findOne({ email }).select('+password_hash')
-         *
-         * Without that, `password_hash` is `undefined` and every password comparison fails. That
-         * failure is loud and immediate (nobody can log in, on the first attempt, in development),
-         * which is the right direction for this particular field to fail in.
+         * ⚠️ `select: false`, so it is absent from every ordinary read and cannot leak through the
+         * legacy listing. No current code path asks for `+password_hash` on this model, and none
+         * should.
          */
         password_hash: {
             type: String,
             required: true,
             select: false
         },
-        /**
-         * Last successful login. `null` means the account has been created but never used — which
-         * is a real and useful distinction from "logged in long ago", so it is not defaulted to the
-         * creation time.
-         */
+        /** Last v0.1 login. Frozen at its last value: the current build never signs in against this row. */
         last_login_at: {
+            type: Date,
+            default: null
+        },
+        /**
+         * When boot marked this row as legacy. `null` on a row the current build has not seen yet.
+         *
+         * ⚠️ DECLARED BECAUSE `markLegacyOperators()` FILTERS ON IT. `strictQuery: true` (core/db.ts)
+         * strips an undeclared filter path, so `updateMany({ legacy_at: null }, …)` against a schema
+         * without this field would run as `updateMany({}, …)`. That would still happen to be
+         * idempotent here, but the same stripping turns a lookup into "match the first document",
+         * so every filtered path on every auth schema is declared.
+         */
+        legacy_at: {
             type: Date,
             default: null
         }
@@ -90,10 +81,10 @@ const adminUserSchema = new Schema(
     }
 );
 
-// The login lookup, and the gate that stops two accounts for one address. NAMED deliberately: an
-// unnamed unique resolves to the default `email_1`, and if any future declaration on this schema
-// ever resolves to that same default with different options, Mongo builds the first and REJECTS the
-// second — leaving the uniqueness gate SILENTLY UNBUILT while the schema still claims it.
+// Kept from v0.1 (the index already exists on upgraded installs). NAMED deliberately: an unnamed
+// unique resolves to the default `email_1`, and a second declaration resolving to that default with
+// different options makes Mongo build the first and REJECT the second — the gate silently unbuilt
+// while the schema still claims it. Every auth index in this folder is named for the same reason.
 adminUserSchema.index({ email: 1 }, { unique: true, name: 'uniq_admin_user_email' });
 
 const AdminUser = model(_modelName, adminUserSchema, _collectionName);

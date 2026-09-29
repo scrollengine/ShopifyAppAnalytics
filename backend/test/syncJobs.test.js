@@ -25,7 +25,7 @@
  *       empty buckets reports a ledger of nothing but partner syncs as "100%
  *       partner syncs" instead of "the other three have never run here".
  *
- *    4. HEALTH REPORTS THE NINE COLLECTIONS THIS BUILD ACTUALLY HAS, and tells
+ *    4. HEALTH REPORTS THE SIXTEEN COLLECTIONS THIS BUILD ACTUALLY HAS, and tells
  *       "never synced" from "synced and found nothing" BY THE WATERMARK. Both
  *       produce zero rows. Publishing them alike reports a quiet week as an
  *       outage, or an outage as a quiet week.
@@ -145,6 +145,18 @@ const _restore = () => {
     delete syncHealthRepository.countAllCollections;
     delete syncHealthRepository.findPartnerAppHealthRows;
     delete syncHealthRepository.aggregateSyncJobHealth;
+    delete syncHealthRepository.readAuthHealthFacts;
+};
+
+/**
+ * Stubs the auth fact the health screen reads (spec A18). Every health test stubs it: left real, it
+ * queries a database this file never connects and burns the 400 ms buffer timeout per call.
+ *
+ * @param {Boolean} ownerMissing - What the install document says about the owner row.
+ * @returns {void}
+ */
+const _stubAuthFacts = (ownerMissing) => {
+    syncHealthRepository.readAuthHealthFacts = async () => ({ owner_missing: Boolean(ownerMissing) });
 };
 
 
@@ -539,7 +551,7 @@ test('warnings are UNIQUE — the dashboard keys them by content, so a duplicate
 
 
 /* ==========================================================================
- *  3.  HEALTH — NINE COLLECTIONS, AND THE WATERMARK DECIDES
+ *  3.  HEALTH — SIXTEEN COLLECTIONS, AND THE WATERMARK DECIDES
  * ========================================================================== */
 
 test(' the health registry lists EXACTLY the collections this build registers — both directions', () => {
@@ -549,7 +561,7 @@ test(' the health registry lists EXACTLY the collections this build registers �
     const registered = Object.values(models).map((model) => model.collection.name).sort();
     const reported = HEALTH_COLLECTIONS.map((entry) => entry.collection).sort();
 
-    assert.equal(registered.length, 9, 'This build has nine collections. If that changed, the registry and this number change together.');
+    assert.equal(registered.length, 16, 'This build has sixteen collections. If that changed, the registry and this number change together.');
     assert.deepEqual(
         reported,
         registered,
@@ -577,7 +589,6 @@ test(' never-synced and synced-but-empty are told apart BY THE WATERMARK, not by
             counts[entry.key] = 0;
         }
         counts.partner_apps = 1;
-        counts.admin_users = 1;
         return counts;
     };
     const _app = (overrides) => Object.assign({
@@ -598,6 +609,7 @@ test(' never-synced and synced-but-empty are told apart BY THE WATERMARK, not by
     }, overrides || {});
 
     syncHealthRepository.countAllCollections = async () => _emptyCounts();
+    _stubAuthFacts(false);
     syncHealthRepository.aggregateSyncJobHealth = async () => ({ last_success: [], last_run: [], by_status: [] });
 
     // ── Nothing has ever synced ──────────────────────────────────────────────
@@ -607,7 +619,7 @@ test(' never-synced and synced-but-empty are told apart BY THE WATERMARK, not by
     const _find = (payload, key) => payload.data.collections.find((entry) => entry.key === key);
 
     assert.equal(never.status, true, 'A health read never refuses — one that fails when things are unhealthy reports nothing at the moment it matters.');
-    assert.equal(never.data.collections.length, 9);
+    assert.equal(never.data.collections.length, 16);
     assert.equal(_find(never, 'partner_app_events').state, HEALTH_COLLECTION_STATES.NEVER_SYNCED);
     assert.equal(_find(never, 'partner_app_transactions').state, HEALTH_COLLECTION_STATES.NEVER_SYNCED);
     assert.match(_find(never, 'partner_app_events').reason, /we have not looked yet/);
@@ -639,9 +651,9 @@ test('the OPTIONAL listing tier reports NOT_CONNECTED, never NEVER_SYNCED — ab
         counts[entry.key] = 0;
     }
     counts.partner_apps = 1;
-    counts.admin_users = 1;
 
     syncHealthRepository.countAllCollections = async () => counts;
+    _stubAuthFacts(false);
     syncHealthRepository.findPartnerAppHealthRows = async () => [];
     syncHealthRepository.aggregateSyncJobHealth = async () => ({ last_success: [], last_run: [], by_status: [] });
 
@@ -661,16 +673,54 @@ test('the OPTIONAL listing tier reports NOT_CONNECTED, never NEVER_SYNCED — ab
     assert.ok(result.data.warnings.some((warning) => /ordinary state/.test(warning)));
 });
 
+test(' a locked install whose owner row is gone raises ONE warning naming the repair command (spec A18)', async () => {
+    const counts = {};
+    for (const entry of HEALTH_COLLECTIONS) {
+        counts[entry.key] = 0;
+    }
+    counts.partner_apps = 1;
+    // Zero legacy operator rows and zero users: the retired "no operator account" advice (which told
+    // the reader to set ADMIN_*) must not come back through either count.
+    counts.admin_users = 0;
+    counts.users = 0;
+
+    syncHealthRepository.countAllCollections = async () => counts;
+    syncHealthRepository.findPartnerAppHealthRows = async () => [];
+    syncHealthRepository.aggregateSyncJobHealth = async () => ({ last_success: [], last_run: [], by_status: [] });
+
+    _stubAuthFacts(true);
+    const missing = await getSyncHealth(IDENTITY, {});
+    _stubAuthFacts(false);
+    const present = await getSyncHealth(IDENTITY, {});
+    _restore();
+
+    const ownerWarnings = missing.data.warnings.filter((warning) => /owner account is missing/.test(warning));
+    assert.equal(ownerWarnings.length, 1, 'owner_missing must raise exactly one warning.');
+    assert.match(ownerWarnings[0], /npm run auth:admin:dist -- repair-owner/, 'The warning must name the recovery command — setup never reopens.');
+    assert.equal(
+        present.data.warnings.some((warning) => /owner account is missing/.test(warning)),
+        false,
+        'The owner warning fired while the owner row exists.'
+    );
+    for (const result of [missing, present]) {
+        assert.equal(
+            result.data.warnings.some((warning) => /ADMIN_EMAIL|ADMIN_PASSWORD/.test(warning)),
+            false,
+            'A health warning still advises ADMIN_* — those variables are ignored by this build.'
+        );
+    }
+});
+
 test(' a job type that has never run is a NULL key, never an absent one', async () => {
     const counts = {};
     for (const entry of HEALTH_COLLECTIONS) {
         counts[entry.key] = 0;
     }
     counts.partner_apps = 1;
-    counts.admin_users = 1;
     counts.sync_jobs = 2;
 
     syncHealthRepository.countAllCollections = async () => counts;
+    _stubAuthFacts(false);
     syncHealthRepository.findPartnerAppHealthRows = async () => [];
     syncHealthRepository.aggregateSyncJobHealth = async () => ({
         last_success: [{
@@ -726,10 +776,10 @@ test(' a PENDING-swept job is NOT reported as "died mid-run" — nothing ran, so
         counts[entry.key] = 0;
     }
     counts.partner_apps = 1;
-    counts.admin_users = 1;
     counts.sync_jobs = 1;
 
     syncHealthRepository.countAllCollections = async () => counts;
+    _stubAuthFacts(false);
     syncHealthRepository.findPartnerAppHealthRows = async () => [];
     syncHealthRepository.aggregateSyncJobHealth = async () => ({
         last_success: [],
@@ -799,6 +849,7 @@ test('the coverage gates travel as BARE values, and a measured 0 survives as 0',
     }
 
     syncHealthRepository.countAllCollections = async () => counts;
+    _stubAuthFacts(false);
     syncHealthRepository.findPartnerAppHealthRows = async () => [{
         _id: 'app-1',
         app_handle: 'demo-app',

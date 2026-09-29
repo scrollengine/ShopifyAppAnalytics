@@ -55,7 +55,8 @@ type DbModule = typeof import('./db');
  *   3. validate  — refuse to boot on a missing TIER-1 setting, naming it.
  *                  Exits the process; anything after this line has usable config.
  *   4. logger    — first line of real output, echoing what was resolved. No
- *                  secret is printed, only whether one is present.
+ *                  secret (and no pinned owner email) is printed, only whether
+ *                  one is present.
  *   5. db        — open the MongoDB connection.
  *
  * Throws if the database cannot be reached. The caller is expected to log and
@@ -89,7 +90,17 @@ const bootstrap = async (): Promise<ConfigModule> => {
         partner_app_id: config.PARTNER.APP_ID || '(resolved at first sync)',
         active_sub_window_days: config.REVENUE.ACTIVE_SUB_WINDOW_DAYS,
         history_floor_date: config.REVENUE.HISTORY_FLOOR_DATE || '(none — early months will under-report)',
-        sync_disabled: config.SYNC.DISABLED
+        sync_disabled: config.SYNC.DISABLED,
+        // The address email links are built from, and the server they leave through. Neither is a
+        // secret. SMTP_PASS and SETUP_OWNER_EMAIL are reported by presence only: a boot log is
+        // shipped to places the people named in it never agreed to be.
+        public_url: config.APP.PUBLIC_URL || '(not set)',
+        mail_configured: config.MAIL.ENABLED,
+        smtp_host: config.MAIL.SMTP_HOST || '(not set)',
+        smtp_port: config.MAIL.SMTP_PORT,
+        smtp_secure: config.MAIL.SMTP_SECURE,
+        smtp_login_present: Boolean(config.MAIL.SMTP_USER && config.MAIL.SMTP_PASS),
+        setup_owner_email_pinned: Boolean(config.AUTH.SETUP_OWNER_EMAIL)
     });
 
     // 5. Database.

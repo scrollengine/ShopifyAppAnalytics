@@ -7,11 +7,12 @@
  *
  *  The Revenue → By country tab's whole-population rollup: `GET /api/stores/countries`.
  *
- *  Handlers are mounted BARE here. The guard is applied ONCE, on the parent sub-router in
- *  `src/routes/index.ts`, and this file inherits it by being mounted there — see that file's header
- *  for why the guard lives in one place rather than being repeated per route file.
+ *  AUTHENTICATION is applied ONCE, on the parent sub-router in `src/routes/index.ts`, and this file
+ *  inherits it by being mounted there — see that file's header for why the guard lives in one place.
  *  `test/routeGuard.test.js` walks the live Express stack and fails on any route reachable without
- *  `verifyAdmin`, so the mount is asserted rather than assumed the moment it is added.
+ *  `authenticate`, so the mount is asserted rather than assumed the moment it is added.
+ *  AUTHORISATION is per route: the rollup is money by country with no store names, so it is
+ *  `financials:read` (spec §4) — unlike the roster it sits beside, which is `merchants:read`.
  *
  *  ── ⚠️ WHY THIS IS A SECOND ROUTER ON `/stores` AND NOT A LINE IN `store.routes.ts` ─────────
  *
@@ -37,8 +38,12 @@
 
 import { Router } from 'express';
 import countryController = require('../controllers/country.controller');
+import requirePermissionMiddleware = require('../middlewares/requirePermission');
+import authModule = require('../modules/auth');
 
 const { _getCountries } = countryController;
+const { requirePermission } = requirePermissionMiddleware;
+const { PERMISSIONS } = authModule;
 
 const router = Router();
 
@@ -52,6 +57,6 @@ const router = Router();
 // Answers 200 with an all-Unknown breakdown and a populated `attribution_state` / `warnings[]` when
 // the listing tier is unconfigured or has never synced — deliberately NOT a refusal, which the page
 // would render as though the operator had no stores.
-router.get('/countries', _getCountries);
+router.get('/countries', requirePermission(PERMISSIONS.FINANCIALS_READ), _getCountries);
 
 export = router;

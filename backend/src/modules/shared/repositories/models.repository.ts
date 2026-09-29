@@ -48,7 +48,14 @@ import type {
     ListingGeoDailyDoc,
     ListingInstallAttributionDoc,
     SyncJobDoc,
-    AdminUserDoc
+    AdminUserDoc,
+    SystemStateDoc,
+    UserDoc,
+    RoleDoc,
+    InviteDoc,
+    AuthTokenDoc,
+    AuthSessionDoc,
+    AuditEventDoc
 } from '../types/entity.types';
 
 /*
@@ -65,7 +72,14 @@ const {
     ListingGeoDaily,
     ListingInstallAttribution,
     SyncJob,
-    AdminUser
+    AdminUser,
+    SystemState,
+    User,
+    Role,
+    Invite,
+    AuthToken,
+    AuthSession,
+    AuditEvent
 } = require('../../../models');
 
 const PartnerAppModel = PartnerApp as mongoose.Model<PartnerAppDoc>;
@@ -78,6 +92,13 @@ const ListingInstallAttributionModel =
     ListingInstallAttribution as mongoose.Model<ListingInstallAttributionDoc>;
 const SyncJobModel = SyncJob as mongoose.Model<SyncJobDoc>;
 const AdminUserModel = AdminUser as mongoose.Model<AdminUserDoc>;
+const SystemStateModel = SystemState as mongoose.Model<SystemStateDoc>;
+const UserModel = User as mongoose.Model<UserDoc>;
+const RoleModel = Role as mongoose.Model<RoleDoc>;
+const InviteModel = Invite as mongoose.Model<InviteDoc>;
+const AuthTokenModel = AuthToken as mongoose.Model<AuthTokenDoc>;
+const AuthSessionModel = AuthSession as mongoose.Model<AuthSessionDoc>;
+const AuditEventModel = AuditEvent as mongoose.Model<AuditEventDoc>;
 
 /**
  * Casts a string id to an ObjectId.
@@ -108,5 +129,12 @@ export = {
     ListingInstallAttributionModel,
     SyncJobModel,
     AdminUserModel,
+    SystemStateModel,
+    UserModel,
+    RoleModel,
+    InviteModel,
+    AuthTokenModel,
+    AuthSessionModel,
+    AuditEventModel,
     toObjectId
 };

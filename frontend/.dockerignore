@@ -17,8 +17,10 @@ node_modules
 out
 build
 
-#  NEVER let these into an image. `.env` holds the admin password, the JWT
-# secret and the Partner API token.
+#  NEVER let these into an image. The dashboard's own `.env` holds only
+# NEXT_PUBLIC_API_BASE_URL, but an `.env` is where secrets live (the stack's holds
+# JWT_SECRET, SMTP_PASS and the Partner API token), and a copy dropped here must
+# never ride along into a layer.
 .env
 .env.*
 

@@ -19,7 +19,9 @@
         "seed:demo": "node -r ts-node/register/transpile-only src/scripts/seedDemo.ts",
         "seed:demo:down": "node -r ts-node/register/transpile-only src/scripts/teardownDemo.ts",
         "seed:demo:dist": "node dist/scripts/seedDemo.js",
-        "seed:demo:down:dist": "node dist/scripts/teardownDemo.js"
+        "seed:demo:down:dist": "node dist/scripts/teardownDemo.js",
+        "auth:admin": "node -r ts-node/register/transpile-only src/scripts/authAdmin.ts",
+        "auth:admin:dist": "node dist/scripts/authAdmin.js"
     },
     "dependencies": {
         "@google-cloud/bigquery": "^9.0.2",
@@ -30,6 +32,7 @@
         "helmet": "^8.3.0",
         "jsonwebtoken": "^9.0.2",
         "mongoose": "^9.7.4",
+        "nodemailer": "^10.0.12",
         "stopcock": "^1.1.0"
     },
     "devDependencies": {

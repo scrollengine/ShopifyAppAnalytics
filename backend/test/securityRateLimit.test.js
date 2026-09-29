@@ -15,16 +15,23 @@
  *  it lets go.
  *
  *  ── ⚠️ WHY HALF OF THIS FILE IS ABOUT GETTING BACK IN ───────────────────────
- *  This deployment has ONE account, no sign-up, no second user and no
- *  password-reset flow. A lockout is not an inconvenience here, it is the end of
- *  that install. So a rate limiter is a genuinely dangerous thing to add, and the
+ *  Sign-in is the only way into the dashboard for EVERY account, and with
+ *  TRUST_PROXY unset every account shares one bucket. A password reset ends at
+ *  this same sign-in, so it is no way around a block. A lockout is not an
+ *  inconvenience here, it is everybody out at once. So a rate limiter is a
+ *  genuinely dangerous thing to add, and the
  *  tests below assert the properties that keep it from being one:
  *
  *    - the refusal EXPIRES on its own, and a correct password works again after
  *      it does (`the operator recovers`);
  *    - a caller hammering a blocked address CANNOT push that expiry outward, so
  *      the wait is bounded by the configured window and nothing else;
- *    - a successful sign-in CLEARS the tally rather than merely not adding to it;
+ *    - a successful sign-in is never charged, and wipes NOTHING — so no member
+ *      can reset the count between guesses at somebody else's password;
+ *    - a caller who hangs up after sending the whole attempt is still charged,
+ *      because the password check runs anyway;
+ *    - a browser that has signed in before has a budget of its own, so a flood
+ *      from anyone else cannot keep a returning user out;
  *    - only a REJECTED CREDENTIAL is charged — not a malformed request, not a
  *      server error;
  *    - `AUTH_LOGIN_RATE_LIMIT_MAX=0` switches the whole thing off;
@@ -40,6 +47,9 @@
  */
 
 process.env.LOG_LEVEL = 'silent';
+// Before any require: src/config snapshots process.env, and sign-in device tokens are MACed with a
+// key derived from this.
+process.env.JWT_SECRET = 'r'.repeat(32);
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -52,12 +62,17 @@ const mongoose = require('mongoose');
 const BACKEND_ROOT = path.resolve(__dirname, '..');
 const APP_ENTRY = path.join(BACKEND_ROOT, 'src', 'apps', 'app.ts');
 
+const net = require('node:net');
+
 const {
     createLoginRateLimiter,
     loginRateLimit,
+    loginBodyParser,
     LOGIN_RATE_LIMIT_PATH,
+    LOGIN_BODY_LIMIT,
     RATE_LIMITED_MESSAGE
 } = require(path.join(BACKEND_ROOT, 'src', 'middlewares', 'loginRateLimit'));
+const loginDeviceService = require(path.join(BACKEND_ROOT, 'src', 'modules', 'auth', 'services', 'loginDevice.service.ts'));
 
 const config = require(path.join(BACKEND_ROOT, 'src', 'config'));
 
@@ -65,6 +80,13 @@ mongoose.set('bufferTimeoutMS', 400);
 
 /** The password the stand-in handler accepts. Nothing here touches bcrypt or the database. */
 const CORRECT_PASSWORD = 'the-operator-remembers-this-one';
+
+/** The account every helper call signs in as unless told otherwise. */
+const OPERATOR_EMAIL = 'operator@example.com';
+
+/** A second account with its own correct password — the insider in the tests below. */
+const MEMBER_EMAIL = 'member@example.com';
+const MEMBER_PASSWORD = 'the-member-knows-only-this-one';
 
 /** A path that is NOT the login route, used to prove the limiter is scoped to the one endpoint. */
 const UNTHROTTLED_PATH = '/api/revenue/now';
@@ -97,7 +119,11 @@ const _standInLoginHandler = (delayMs) => {
         if (!body.email || !body.password) {
             return res.status(400).json({ status: false, msg: 'Email and password are both required.', data: {}, error: {} });
         }
-        if (body.password === CORRECT_PASSWORD) {
+        // Normalised the way the real login service normalises it.
+        const email = String(body.email).trim().toLowerCase();
+        const correct = (email === OPERATOR_EMAIL && body.password === CORRECT_PASSWORD)
+            || (email === MEMBER_EMAIL && body.password === MEMBER_PASSWORD);
+        if (correct) {
             return res.status(200).json({ status: true, msg: 'Signed in.', data: { token: 'stand-in-token' }, error: {} });
         }
         return res.status(401).json({ status: false, msg: 'Email or password is incorrect.', data: {}, error: {} });
@@ -108,7 +134,7 @@ const _standInLoginHandler = (delayMs) => {
  * Starts a server composed the way `src/apps/app.ts` composes the login path.
  *
  * The limiter is mounted on `LOGIN_RATE_LIMIT_PATH` — the constant the entry point mounts it on —
- * and BEFORE the body parser, both for the same reasons as the real thing.
+ * behind the login path's own small parser and BEFORE the general one, as the real thing is.
  *
  * @param {Object} params0 - The parameters object.
  * @param {Number} params0.max_failures - Rejected credentials allowed per window.
@@ -122,10 +148,17 @@ const _startServer = async ({ max_failures, window_ms, trust_proxy, delay_ms, tr
     if (trust_proxy !== undefined) {
         app.set('trust proxy', trust_proxy);
     }
-    app.use(LOGIN_RATE_LIMIT_PATH, createLoginRateLimiter({ max_failures: max_failures, window_ms: window_ms, trickle_ms: trickle_ms }));
+    let handled = 0;
+    const handler = _standInLoginHandler(delay_ms || 0);
+    app.use(LOGIN_RATE_LIMIT_PATH, loginBodyParser, createLoginRateLimiter({ max_failures: max_failures, window_ms: window_ms, trickle_ms: trickle_ms }));
     app.use(express.json({ limit: '1mb' }));
-    app.post(LOGIN_RATE_LIMIT_PATH, _standInLoginHandler(delay_ms || 0));
+    app.post(LOGIN_RATE_LIMIT_PATH, (req, res) => {
+        handled += 1;
+        return handler(req, res);
+    });
     app.get(UNTHROTTLED_PATH, (_req, res) => res.status(401).json({ status: false, msg: 'Not authenticated.', data: {}, error: {} }));
+    // Stands in for the terminal error handler (an aborted or oversized body), minus its log line.
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ status: false, msg: 'The request could not be read.', data: {}, error: {} }));
 
     const server = await new Promise((resolve) => {
         const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -137,15 +170,20 @@ const _startServer = async ({ max_failures, window_ms, trust_proxy, delay_ms, tr
      *
      * @param {Object} params0 - The parameters object.
      * @param {String} [params0.password] - Password to submit. Omit for a malformed request.
+     * @param {String} [params0.email] - Email to submit. Defaults to the operator's.
+     * @param {String} [params0.device_token] - A sign-in device token to send along.
      * @param {String} [params0.forwarded_for] - Value for the X-Forwarded-For header.
      * @returns {Promise<Object>} `{ status, body, retry_after }`.
      */
-    const login = async ({ password, forwarded_for } = {}) => {
+    const login = async ({ password, email, device_token, forwarded_for } = {}) => {
         const headers = { 'content-type': 'application/json' };
         if (forwarded_for) {
             headers['x-forwarded-for'] = forwarded_for;
         }
-        const payload = password === undefined ? {} : { email: 'operator@example.com', password: password };
+        const payload = password === undefined ? {} : { email: email || OPERATOR_EMAIL, password: password };
+        if (device_token !== undefined) {
+            payload.device_token = device_token;
+        }
         const response = await fetch(`${baseUrl}${LOGIN_RATE_LIMIT_PATH}`, {
             method: 'POST',
             headers: headers,
@@ -160,9 +198,33 @@ const _startServer = async ({ max_failures, window_ms, trust_proxy, delay_ms, tr
         return { status: response.status, body: body, retry_after: response.headers.get('retry-after') };
     };
 
+    /**
+     * Sends a complete login attempt over a raw socket and hangs up before the answer arrives.
+     *
+     * @param {Object} params0 - The parameters object.
+     * @param {String} params0.password - Password to submit.
+     * @param {Number} params0.after_ms - How long after sending to destroy the socket.
+     * @param {Boolean} [params0.partial] - Send only half the body, so the request never completes.
+     * @returns {Promise<void>} Resolves once the socket is destroyed.
+     */
+    const abandonedLogin = ({ password, after_ms, partial }) => new Promise((resolve) => {
+        const data = JSON.stringify({ email: OPERATOR_EMAIL, password: password });
+        const socket = net.connect(server.address().port, '127.0.0.1', () => {
+            const head = `POST ${LOGIN_RATE_LIMIT_PATH} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(data)}\r\n\r\n`;
+            socket.write(head + (partial ? data.slice(0, Math.floor(data.length / 2)) : data));
+            setTimeout(() => {
+                socket.destroy();
+                resolve();
+            }, after_ms);
+        });
+        socket.on('error', () => resolve());
+    });
+
     return {
         baseUrl: baseUrl,
         login: login,
+        abandonedLogin: abandonedLogin,
+        handled: () => handled,
         get: async (routePath) => {
             const response = await fetch(`${baseUrl}${routePath}`);
             return { status: response.status };
@@ -205,8 +267,9 @@ test('the budget is spent by rejected credentials, and the next attempt is refus
 test('the refusal reveals nothing about which account was being guessed', async () => {
     // The login path is enumeration-resistant by construction — one message for both failure modes,
     // and a dummy bcrypt compare so the timings match. A 429 must not undo that by naming what was
-    // tried. It cannot, structurally: the tally counts rejected credentials from an ADDRESS and
-    // never looks at the body. This asserts that stays true.
+    // tried. It cannot, structurally: the tally counts rejected credentials from an ADDRESS, and the
+    // body is read only to find a device token's own budget, never to word a refusal. This asserts
+    // that stays true.
     const server = await _startServer({ max_failures: 1, window_ms: 60000 });
     try {
         await server.login({ password: 'wrong' });
@@ -255,8 +318,8 @@ test('the limiter is scoped to the login path and throttles nothing else', async
             others,
             new Array(10).fill(401),
             'a route other than the login endpoint was throttled. The limiter is mounted on one path on purpose: '
-            + 'the guarded API is protected by verifyAdmin, and throttling it would only give an anonymous caller '
-            + 'a way to degrade the dashboard for the operator.'
+            + 'the guarded API is protected by authenticate, and throttling it would only give an anonymous caller '
+            + 'a way to degrade the dashboard for everyone.'
         );
     } finally {
         await server.close();
@@ -265,12 +328,12 @@ test('the limiter is scoped to the login path and throttles nothing else', async
 
 
 /* ==========================================================================
- *  2. It lets go — the half that matters on a one-account install
+ *  2. It lets go — the half that matters when every account shares one sign-in
  * ========================================================================== */
 
 test(' THE OPERATOR RECOVERS: the window expires and the correct password works again', async () => {
-    //  THE MOST IMPORTANT TEST IN THIS FILE. One account, no reset flow, no second user. If this
-    // assertion ever fails, a forgotten password becomes a permanently unusable install.
+    //  THE MOST IMPORTANT TEST IN THIS FILE. A reset link ends at this same sign-in, so it is no way
+    // around a block. If this assertion ever fails, a few wrong guesses become a permanently unusable install.
     const server = await _startServer({ max_failures: 2, window_ms: 400 });
     try {
         assert.equal((await server.login({ password: 'wrong' })).status, 401);
@@ -285,8 +348,8 @@ test(' THE OPERATOR RECOVERS: the window expires and the correct password works 
         assert.equal(
             recovered.status,
             200,
-            'THE OPERATOR IS LOCKED OUT AFTER THE WINDOW EXPIRED. On a deployment with one account and no '
-            + 'password-reset flow this is the end of the install. Do not weaken this test — fix the limiter.'
+            'THE OPERATOR IS LOCKED OUT AFTER THE WINDOW EXPIRED. A password reset ends at this same sign-in, '
+            + 'so this is the end of the install. Do not weaken this test — fix the limiter.'
         );
         assert.equal(recovered.body.data.token, 'stand-in-token');
     } finally {
@@ -320,32 +383,53 @@ test('hammering a blocked address does NOT push the recovery further away', asyn
             recovered.status,
             200,
             'The window did not expire on schedule while the endpoint was under attack. That makes the block '
-            + 'indefinite for as long as somebody keeps trying — an attacker-controlled lockout of the only account.'
+            + 'indefinite for as long as somebody keeps trying — an attacker-controlled lockout of every account.'
         );
     } finally {
         await server.close();
     }
 });
 
-test('a successful sign-in CLEARS the tally rather than merely not adding to it', async () => {
+test('a successful sign-in wipes NOTHING: earlier failures still count', async () => {
+    // It used to clear the tally. With more than one account that let any member reset the count
+    // between guesses at somebody else's password, so a near-miss now ages out with its window
+    // instead. The success itself is still never charged (next test).
     const server = await _startServer({ max_failures: 3, window_ms: 60000 });
     try {
         assert.equal((await server.login({ password: 'wrong' })).status, 401);
         assert.equal((await server.login({ password: 'wrong' })).status, 401);
         assert.equal((await server.login({ password: CORRECT_PASSWORD })).status, 200);
 
-        // A full fresh budget, not the one remaining attempt that was left before the success.
-        const afterSuccess = [];
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-            afterSuccess.push((await server.login({ password: 'wrong' })).status);
-        }
-        assert.deepEqual(
-            afterSuccess,
-            [401, 401, 401],
-            'the tally survived a successful sign-in. A near-miss followed by a correct password must leave nothing behind, '
-            + 'or an operator who mistypes twice in the morning starts the afternoon two-thirds of the way to a block.'
+        assert.equal((await server.login({ password: 'wrong' })).status, 401, 'the one attempt left in the budget was not admitted');
+        assert.equal(
+            (await server.login({ password: 'wrong' })).status,
+            TOO_MANY,
+            'the success wiped the two earlier failures. Any account holder could then reset the count between guesses at another account.'
         );
-        assert.equal((await server.login({ password: 'wrong' })).status, TOO_MANY, 'the limiter stopped counting entirely after a success');
+    } finally {
+        await server.close();
+    }
+});
+
+test(' AN INSIDER CANNOT RESET THE COUNT: guesses at one account plus a success on another still reach 429', async () => {
+    // The reproduced bypass: from one address, max-1 wrong passwords for the operator, then one
+    // correct sign-in to the insider's OWN account, repeated. When a success wiped the tally this
+    // was ten guesses and no refusal at all.
+    const server = await _startServer({ max_failures: 3, window_ms: 60000 });
+    try {
+        const statuses = [];
+        for (let cycle = 0; cycle < 4; cycle += 1) {
+            statuses.push((await server.login({ password: 'guess' })).status);
+            statuses.push((await server.login({ password: 'guess' })).status);
+            statuses.push((await server.login({ email: MEMBER_EMAIL, password: MEMBER_PASSWORD })).status);
+        }
+        const guessesAdmitted = statuses.filter((status, index) => index % 3 !== 2 && status === UNAUTHORIZED).length;
+        assert.equal(
+            guessesAdmitted,
+            3,
+            `${guessesAdmitted} guesses at the operator were answered (statuses ${statuses.join(',')}); the budget is 3 however many successes are mixed in`
+        );
+        assert.ok(statuses.includes(TOO_MANY), 'no refusal at all — the insider\'s own successes are resetting the count');
     } finally {
         await server.close();
     }
@@ -399,7 +483,7 @@ test('AUTH_LOGIN_RATE_LIMIT_MAX=0 turns the limiter off entirely', async () => {
 });
 
 test('the limiter FAILS OPEN when there is no address to charge', async () => {
-    // verifyAdmin is the authentication boundary; this is availability protection. A throttle that
+    // authenticate is the authentication boundary; this is availability protection. A throttle that
     // refuses when it cannot do its job would be a denial of the only way into the deployment.
     const limiter = createLoginRateLimiter({ max_failures: 1, window_ms: 60000 });
 
@@ -516,10 +600,10 @@ test(' src/apps/app.ts mounts the limiter, on that path, before the body parser'
         .replace(/(^|[^:])\/\/.*$/gm, '$1');
 
     assert.ok(
-        /app\.use\(\s*LOGIN_RATE_LIMIT_PATH\s*,\s*loginRateLimit\s*\)/.test(withoutComments),
-        'src/apps/app.ts no longer mounts loginRateLimit on LOGIN_RATE_LIMIT_PATH. Every behavioural assertion in '
-        + 'this file is made against a reproduction of that mount, so without this line they prove nothing about the '
-        + 'running application.'
+        /app\.use\(\s*LOGIN_RATE_LIMIT_PATH\s*,\s*loginBodyParser\s*,\s*loginRateLimit\s*\)/.test(withoutComments),
+        'src/apps/app.ts no longer mounts loginBodyParser then loginRateLimit on LOGIN_RATE_LIMIT_PATH. Every behavioural '
+        + 'assertion in this file is made against a reproduction of that mount, so without this line they prove nothing '
+        + 'about the running application.'
     );
 
     const mounts = [...withoutComments.matchAll(/app\.use\(\s*([A-Za-z_$][\w$.]*)/g)].map((match) => match[1]);
@@ -629,7 +713,7 @@ test('TRUST_PROXY defaults to false — the direction that cannot be switched of
  *  client-supplied header travels to this process untouched.
  *
  *  The deployment-wide budget answers the second. The trickle answers what the
- *  first would otherwise become — a permanent lockout of the only account.
+ *  first would otherwise become — a permanent lockout of every account.
  * ========================================================================== */
 
 test('a forged X-Forwarded-For mints a fresh per-address budget — the hole the global budget exists to close', async () => {
@@ -707,7 +791,7 @@ test('THE OPERATOR IS NEVER PERMANENTLY LOCKED OUT: a spent budget still trickle
     // The failure this whole file most fears, in the form the shipped topology actually produces.
     // With TRUST_PROXY unset every caller shares one budget, so an attacker spends it and the
     // operator — same bucket — is refused. A window that can be re-spent the instant it rolls is a
-    // permanent lockout of the only account on the deployment.
+    // permanent lockout of every account on the deployment.
     //
     // The trickle is what makes it a RATE instead: one attempt every interval gets through, and a
     // correct password on one of them ends the block outright.
@@ -732,11 +816,12 @@ test('THE OPERATOR IS NEVER PERMANENTLY LOCKED OUT: a spent budget still trickle
             recovered.status,
             200,
             'The operator holding the correct password could not sign in even after the trickle interval. '
-            + 'With one account and no reset, that is the end of the install.'
+            + 'With every account behind one bucket and a reset that ends at this same sign-in, that is the end of the install.'
         );
 
-        // And the success cleared the tally, so normal use resumes rather than resuming mid-block.
-        assert.equal((await server.login({ password: 'wrong' })).status, UNAUTHORIZED);
+        // A success clears nothing (see "wipes NOTHING" above): the budget is still spent, so the
+        // next attempt waits for the next interval like everyone else's.
+        assert.equal((await server.login({ password: 'wrong' })).status, TOO_MANY);
     } finally {
         await server.close();
     }
@@ -763,9 +848,9 @@ test('the trickle is a rate, not an opening: a second attempt inside the interva
     }
 });
 
-test('a correct password clears the DEPLOYMENT-wide tally too, not just the address', async () => {
-    // Otherwise the operator signs in, and the next request re-locks the only account against a
-    // global block their own success should have ended.
+test('a correct password does NOT lift a deployment-wide block', async () => {
+    // It used to: "whoever just proved they hold a password is a real user". With more than one
+    // account, any member could then end a block raised by a distributed attack on the owner.
     const server = await _startServer({ max_failures: 1, window_ms: 60000, trickle_ms: 200, trust_proxy: true });
 
     try {
@@ -783,12 +868,156 @@ test('a correct password clears the DEPLOYMENT-wide tally too, not just the addr
         const recovered = await server.login({ password: CORRECT_PASSWORD, forwarded_for: '203.0.113.201' });
         assert.equal(recovered.status, 200, 'the operator could not get through the global block via the trickle');
 
-        // The global tally is gone, so a fresh address is answered normally rather than refused.
         assert.equal(
             (await server.login({ password: 'wrong', forwarded_for: '203.0.113.202' })).status,
-            UNAUTHORIZED,
-            'the deployment-wide block survived a successful sign-in'
+            TOO_MANY,
+            'a success lifted the deployment-wide block'
         );
+    } finally {
+        await server.close();
+    }
+});
+
+
+/* ==========================================================================
+ *  7. Hanging up is not a refund
+ * ========================================================================== */
+
+test(' a caller who hangs up after sending the whole attempt is STILL CHARGED — the password check runs anyway', async () => {
+    // The reproduced bypass: full body, socket closed ~20 ms later. The handler (bcrypt, an audit
+    // row) ran to the end every time, and the charge was refunded because nobody read the answer —
+    // unmetered cost-12 bcrypt on the one event loop for anyone who closes a socket.
+    const server = await _startServer({ max_failures: 3, window_ms: 60000, delay_ms: 80 });
+    try {
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+            await server.abandonedLogin({ password: `guess-${attempt}`, after_ms: 20 });
+        }
+        await _wait(300);
+        assert.equal(server.handled(), 3, `the handler ran ${server.handled()} times; only the budget of 3 may reach it`);
+        assert.equal(
+            (await server.login({ password: 'wrong' })).status,
+            TOO_MANY,
+            'abandoned attempts were refunded, so hanging up is a way past the limit'
+        );
+    } finally {
+        await server.close();
+    }
+});
+
+test('a request abandoned BEFORE its body arrived is refunded — the handler never ran', async () => {
+    const server = await _startServer({ max_failures: 2, window_ms: 60000 });
+    try {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            await server.abandonedLogin({ password: `guess-${attempt}`, after_ms: 20, partial: true });
+        }
+        await _wait(100);
+        assert.equal(server.handled(), 0, 'a half-sent body reached the handler');
+        assert.equal((await server.login({ password: 'wrong' })).status, UNAUTHORIZED, 'a caller on a bad connection was charged for their network');
+        assert.equal((await server.login({ password: 'wrong' })).status, UNAUTHORIZED);
+        assert.equal((await server.login({ password: 'wrong' })).status, TOO_MANY);
+    } finally {
+        await server.close();
+    }
+});
+
+test('a hang-up is still judged by the answer: an abandoned SUCCESS is refunded', async () => {
+    const server = await _startServer({ max_failures: 1, window_ms: 60000, delay_ms: 60 });
+    try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            await server.abandonedLogin({ password: CORRECT_PASSWORD, after_ms: 15 });
+        }
+        await _wait(250);
+        assert.equal((await server.login({ password: 'wrong' })).status, UNAUTHORIZED, 'an abandoned correct password was charged as a failure');
+    } finally {
+        await server.close();
+    }
+});
+
+
+/* ==========================================================================
+ *  8. A browser that has signed in before has a budget of its own
+ * ========================================================================== */
+
+/** A device token the way a successful sign-in hands one out. */
+const _deviceToken = (email) => loginDeviceService.issueLoginDeviceToken({ email: email, now: new Date() });
+
+test(' A FLOOD CANNOT KEEP A RETURNING USER OUT: a valid device token signs in while the shared budget is spent and polled', async () => {
+    // The reproduced lockout: TRUST_PROXY unset (one shared key), an attacker spends the budget and
+    // then polls, taking every trickle admission. The owner's correct password never got through.
+    const server = await _startServer({ max_failures: 2, window_ms: 60000, trickle_ms: 100 });
+    try {
+        const token = _deviceToken(OPERATOR_EMAIL);
+        assert.ok(token, 'precondition: a device token could not be issued');
+
+        await server.login({ password: 'wrong' });
+        await server.login({ password: 'wrong' });
+        let stop = false;
+        const poller = (async () => {
+            while (!stop) {
+                await server.login({ email: 'someone@example.com', password: 'guess' });
+            }
+        })();
+        await _wait(250);
+
+        assert.equal((await server.login({ password: CORRECT_PASSWORD })).status, TOO_MANY, 'precondition: without a device token the owner is refused');
+        const withDevice = await server.login({ password: CORRECT_PASSWORD, device_token: token });
+        stop = true;
+        await poller;
+        assert.equal(
+            withDevice.status,
+            200,
+            'the owner, from a browser they have signed in on before, was refused while someone else flooded the shared budget'
+        );
+    } finally {
+        await server.close();
+    }
+});
+
+test('a device token proves nothing for another account, is useless once tampered, and its own budget is finite', async () => {
+    const server = await _startServer({ max_failures: 2, window_ms: 60000 });
+    try {
+        await server.login({ password: 'wrong' });
+        await server.login({ password: 'wrong' });
+        assert.equal((await server.login({ password: CORRECT_PASSWORD })).status, TOO_MANY, 'precondition: the shared budget is spent');
+
+        // A member's own token, sent with the OWNER's email: bound to the wrong email, so no budget.
+        const memberToken = _deviceToken(MEMBER_EMAIL);
+        assert.equal(
+            (await server.login({ password: CORRECT_PASSWORD, device_token: memberToken })).status,
+            TOO_MANY,
+            'a member\'s device token bought a budget against another account'
+        );
+        const ownerToken = _deviceToken(OPERATOR_EMAIL);
+        const tampered = `${ownerToken.slice(0, -2)}${ownerToken.endsWith('AA') ? 'BB' : 'AA'}`;
+        assert.equal((await server.login({ password: CORRECT_PASSWORD, device_token: tampered })).status, TOO_MANY, 'a tampered token was honoured');
+
+        // The owner's token has a budget of 2 failures of its own; after that it is an ordinary caller.
+        assert.equal((await server.login({ password: 'wrong', device_token: ownerToken })).status, UNAUTHORIZED);
+        assert.equal((await server.login({ password: 'wrong', device_token: ownerToken })).status, UNAUTHORIZED);
+        assert.equal(
+            (await server.login({ password: 'wrong', device_token: ownerToken })).status,
+            TOO_MANY,
+            'a device token is an unlimited budget — whoever holds one could guess forever'
+        );
+        // Emails are matched the way sign-in normalises them.
+        const fresh = _deviceToken(OPERATOR_EMAIL);
+        assert.equal((await server.login({ email: '  Operator@Example.com ', password: CORRECT_PASSWORD, device_token: fresh })).status, 200);
+    } finally {
+        await server.close();
+    }
+});
+
+test('the login path parses at most LOGIN_BODY_LIMIT before the limiter, and an oversized body never reaches the handler', async () => {
+    assert.equal(LOGIN_BODY_LIMIT, '8kb');
+    const server = await _startServer({ max_failures: 2, window_ms: 60000 });
+    try {
+        const response = await fetch(`${server.baseUrl}${LOGIN_RATE_LIMIT_PATH}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ email: OPERATOR_EMAIL, password: 'x'.repeat(20 * 1024) })
+        });
+        assert.equal(response.status, 413);
+        assert.equal(server.handled(), 0);
     } finally {
         await server.close();
     }

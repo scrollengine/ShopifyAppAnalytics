@@ -91,6 +91,22 @@ const _statusOf = (error: any): number => {
 };
 
 /**
+ * Whether the error is the body parser failing to read the REQUEST (a malformed or oversized body,
+ * an aborted upload). `body-parser`/`raw-body` tag every such error with a string `type`
+ * ('entity.parse.failed', 'entity.too.large', 'request.aborted', …) and a 4xx status.
+ *
+ * ⚠️ Their message and stack QUOTE THE BODY: V8's JSON.parse error carries about ten characters
+ * around the fault, which on a sign-in or reset body is a piece of a password or token (seen live:
+ * `"password":SMOKEPROBE"... is not valid JSON` at ERROR). And `err.body` holds the whole of it.
+ *
+ * @param error - The caught error.
+ * @returns True for a body-reading failure.
+ */
+const _isBodyReadError = (error: any): boolean => {
+    return Boolean(error) && typeof error.type === 'string' && _statusOf(error) < 500;
+};
+
+/**
  * The terminal error handler.
  *
  * MOUNT IT LAST, AFTER THE ROUTER. Express walks the stack in registration order; a handler
@@ -111,12 +127,18 @@ const terminalErrorHandler: express.ErrorRequestHandler = (err, _req, res, _next
     // Required lazily for the reason src/apps/app.ts explains: the logger reaches config, and
     // config snapshots process.env at first require. A module-scope import here would be reached
     // through the entry point's import graph before bootstrap() has loaded .env.
-    const { customConsoleError }: LoggerModule = require('../core/logger');
-    customConsoleError('ERROR: unhandled request error', {
-        status: status,
-        msg: err && err.message,
-        stack: err && err.stack
-    });
+    const logger: LoggerModule = require('../core/logger');
+    if (_isBodyReadError(err)) {
+        // The class of failure only: the message, the stack and `err.body` all carry the body.
+        // A client's malformed request is not a server fault, so WARN, not ERROR.
+        logger.customConsoleWarn('WARN: request body could not be read', { status: status, type: err.type });
+    } else {
+        logger.customConsoleError('ERROR: unhandled request error', {
+            status: status,
+            msg: err && err.message,
+            stack: err && err.stack
+        });
+    }
 
     // Headers already flushed: the response is mid-flight and there is no envelope left to send.
     // Destroying the socket is what Express's own default does, and it is the only honest ending —

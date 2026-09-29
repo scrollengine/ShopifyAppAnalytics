@@ -441,7 +441,10 @@ test('a cohort too young to have reached a checkpoint publishes NULL there, not 
 
 test('retention is the install-state fold, not a count comparison — an uninstall lowers exactly one cell onward', async () => {
     _seedRetention();
-    const data = await _read(getCohortRetention, { weeks: 12 });
+    // ⚠️ 13, not 12. Twelve weekly cohorts reach back 77 days plus however far into the current week
+    // today is (0-6), so an 80-day-old install falls OUTSIDE the window on the first three days of
+    // every week and this test failed on the calendar, not on the code. Thirteen reaches 84-90 days.
+    const data = await _read(getCohortRetention, { weeks: 13 });
 
     const older = data.cohorts.find((row) => row.installs === 2);
     assert.ok(older, 'the 80-day-old cohort must have a row of its own');

@@ -93,11 +93,16 @@ Entirely permitted, for your own company's internal business operations. Two
 things that will make your life easier:
 
 - **Run the tests.** `cd backend && npm ci && npm test`. They need no database,
-  no network and no credentials. `test/routeGuard.test.js` is the one to care
-  about: it asserts that every `/api/*` route is behind `verifyAdmin`, and that
-  the only endpoints reachable without a token are `POST /api/auth/login` and
-  `GET /healthz`. If you add a route, that test tells you whether you have just
-  published it to the internet.
+  no network and no credentials. Two are the ones to care about.
+  `test/routeGuard.test.js` asserts that every `/api/*` route is behind
+  `authenticate`, and that the only endpoints reachable without signing in are
+  the ten in its `ALLOWLIST` — `GET /healthz`, sign-in, and the setup,
+  invitation and password-reset flows. If you add a route, that test tells you
+  whether you have just published it to the internet.
+  `test/permissionMap.test.js` asserts that every guarded route declares exactly
+  one permission, and the one its pinned table names — so a new route needs a
+  row there, and a store roster cannot quietly end up behind a key that
+  promises "no store names".
 - **CI runs the same things** — see `.github/workflows/ci.yml`. It also checks
   for import cycles, which are invisible to both `tsc` and `eslint` in this
   codebase and have broken this test suite once already, with nothing in the

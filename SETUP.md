@@ -2,9 +2,9 @@
 
 From nothing to a running dashboard, in order.
 
-This is the **procedural** guide: what to click, what to paste, what to check. It covers the two
-credential sets — Shopify Partner (required) and Google BigQuery (optional) — and how to get each of
-them into a Docker deployment.
+This is the **procedural** guide: what to click, what to paste, what to check. It covers the
+credential sets — Shopify Partner and a mail server (both required), Google BigQuery (optional) — and
+how to get each of them into a Docker deployment.
 
 It does not repeat the reference material. When you need to know what a variable *means* rather than
 where to put it, [`DEPLOYMENT.md`](./DEPLOYMENT.md) is the reference; every table lives there.
@@ -25,7 +25,10 @@ You need:
 - **Docker** with the Compose plugin (`docker compose version` should print v2 or later).
 - **A Shopify Partner account** with at least one published app. Every figure in this system is
   scoped to one app id; there is no other tenancy concept.
-- **About 10 minutes** for the required path. The optional BigQuery tier adds ~20 more, plus up to
+- **A mailbox the dashboard can send from.** A Gmail account with 2-Step Verification is enough
+  ([2.3](#23-outgoing-mail)); so is any SMTP server. Sign-in accounts are created and recovered by
+  emailed link, so this is not optional.
+- **About 15 minutes** for the required path. The optional BigQuery tier adds ~20 more, plus up to
   24 hours of waiting for Google's first export to land.
 
 You do **not** need Node, npm, or MongoDB installed. The stack brings its own.
@@ -70,9 +73,16 @@ before you put an API token in it.
 
 ---
 
-## 2. Tier 1 — the Shopify Partner credentials
+## 2. Tier 1 — the required settings
 
-Four values. Full walkthrough with screenshots-worth of detail is in
+Four things, all in the root `.env`: the Shopify Partner credentials and a signing secret, the
+address you open the dashboard at, a mail server, and who may claim first-run setup. What each
+variable means, its default and what breaks without it is in
+[`DEPLOYMENT.md § 3`](./DEPLOYMENT.md#3-environment-reference).
+
+### 2.1 Shopify Partner credentials
+
+Three values. Full walkthrough with screenshots-worth of detail is in
 [`DEPLOYMENT.md § 2`](./DEPLOYMENT.md#2-getting-the-credentials); the short version:
 
 | variable | where it comes from |
@@ -80,7 +90,6 @@ Four values. Full walkthrough with screenshots-worth of detail is in
 | `SHOPIFY_PARTNER_ORG_ID` | the number in your Partner dashboard URL: `partners.shopify.com/`**`<THIS>`**`/apps` |
 | `SHOPIFY_PARTNER_API_TOKEN` | Partner dashboard → **Settings** → **Partner API clients** → create one. **READ scopes only.** |
 | `SHOPIFY_PARTNER_APP_ID` | the number in your app's URL: `/apps/`**`<THIS>`** — the app id, not the client id |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | you choose these; they create the single operator account on first boot |
 
 Also set `JWT_SECRET` to a long random string:
 
@@ -94,13 +103,151 @@ openssl rand -hex 48
 > read-only: it rejects any GraphQL document containing a mutation before the request leaves the
 > process. Do not grant write scopes.
 
-### Start the stack
+### 2.2 The dashboard's address
+
+```dotenv
+APP_PUBLIC_URL=http://localhost:3000
+```
+
+The address you type into a browser to reach the dashboard — scheme and host, plus the port if it is
+not the default, and no path. `http://localhost:3000` is right while you try it on this machine;
+once it is behind TLS it is `https://analytics.yourcompany.com`
+([`DEPLOYMENT.md § 8`](./DEPLOYMENT.md#reverse-proxy-and-tls)).
+
+**Every link in every email is built from this value**, and never from the request — a request's
+Host header is written by whoever sends it, so a password-reset link built from it would point
+wherever an attacker liked. So it must be the address *other people* can open: with `localhost`,
+invitation links work only on this machine (boot warns). And it is never `http://backend:8080`,
+which is where the dashboard proxies to inside the compose network and opens nowhere else.
+
+### 2.3 Outgoing mail
+
+The owner account is confirmed by email, everyone else joins by emailed invitation, and a forgotten
+password is reset by emailed link. There is deliberately no copy-this-link fallback in the dashboard,
+so the backend refuses to start without a mail server. (Someone with shell access to the server can
+print a link with the recovery CLI instead —
+[`DEPLOYMENT.md`, Account recovery (CLI)](./DEPLOYMENT.md#account-recovery-cli).)
+
+#### Gmail, with an app password
+
+A personal Gmail account works. Gmail does not accept your normal Google password over SMTP; it wants
+an **app password**, a separate 16-letter password for one application.
+
+1. **Turn on 2-Step Verification** for the Google account that will send the mail: Google Account →
+   **Security** → **2-Step Verification**. App passwords do not exist without it.
+2. **Create an app password** at <https://myaccount.google.com/apppasswords>. Give it a name you will
+   recognise ("Shopify App Analytics") and press **Create**. Google shows 16 letters in four groups
+   of four. Copy them now — Google does not show them again.
+3. **Put it in `.env`:**
+
+   ```dotenv
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=465
+   SMTP_SECURE=true
+   SMTP_USER=you@gmail.com
+   SMTP_PASS=abcdefghijklmnop
+   SMTP_FROM=you@gmail.com
+   ```
+
+   The spaces Google shows do not matter: for `smtp.gmail.com`, every space in `SMTP_PASS` is removed
+   before it is used (if you paste them, single-quote the value). For any other host the password is
+   used exactly as written, apart from trimming the ends.
+
+Four things worth knowing about the Gmail route:
+
+- **`SMTP_FROM` should be the Gmail address itself.** Gmail sends as the account that logged in and
+  rewrites any other From address unless you have set that address up as a *Send mail as* alias in
+  Gmail. (Left blank, `SMTP_FROM` falls back to `SMTP_USER`, which here is the same address.)
+- **Changing the Google account password revokes every app password.** Mail then stops, and the next
+  boot logs `WARN: mail: the mail server check failed` with `error_class` `EAUTH_535`. Create a new app
+  password and put it in `SMTP_PASS`.
+- **Gmail allows about 500 recipients a day** from a personal account, and suspends sending for a
+  while when that is exceeded. This install caps itself well below that — `EMAIL_MAX_PER_DAY`
+  defaults to 200, `EMAIL_MAX_PER_HOUR` to 30 — and mail triggered by an anonymous request may use
+  only half of either.
+- **If the App passwords page says the setting is not available**, 2-Step Verification is not on,
+  the account belongs to an organisation (Google Workspace) whose administrator has turned app
+  passwords off, or it uses Google's Advanced Protection. Use another account, or your
+  organisation's own mail server below.
+
+Port 587 works with Gmail too — `SMTP_PORT=587` and `SMTP_SECURE` left unset — if 465 is blocked
+where you run.
+
+The app password can send mail as you. It lives in `.env` beside the Partner token; if the server
+is ever compromised, delete it at <https://myaccount.google.com/apppasswords> (deletion is
+immediate) along with rotating the rest.
+
+#### Any other SMTP server
+
+```dotenv
+SMTP_HOST=smtp.yourprovider.com
+SMTP_PORT=587
+SMTP_USER=<the login your provider gave you>
+SMTP_PASS=<its password or API key>
+SMTP_FROM=analytics@yourcompany.com
+SMTP_FROM_NAME=Shopify App Analytics
+```
+
+- **587 with `SMTP_SECURE` unset** starts in plain text and upgrades with STARTTLS — and the upgrade
+  is **required**: a server that does not offer it is refused rather than written to in the clear.
+  **465 needs `SMTP_SECURE=true`** (TLS from the first byte). The certificate is always verified.
+- **A login that is not an email address** — SendGrid's is literally `apikey` — means `SMTP_FROM`
+  must be set, and to an address your provider lets you send as (usually a verified sender or domain).
+- **A relay that accepts mail without a login:** leave `SMTP_USER` and `SMTP_PASS` both blank. Setting
+  one without the other refuses to boot.
+- **A `$` in the password:** Docker Compose expands `$NAME` inside unquoted and double-quoted values of
+  `.env`. Single-quote the value — `SMTP_PASS='pa$sword'` — or write each `$` as `$$`.
+- **`SMTP_ALLOW_INSECURE=true`** exists for a local test relay only. It allows an unencrypted,
+  unverified connection, and boot warns loudly while it is set.
+
+#### Check it
+
+After you start the stack (2.5), the boot log says one of:
+
+```
+INFO: mail: the mail server accepted the connection and the login
+WARN: mail: the mail server check failed — emails will not be delivered until this is fixed
+```
+
+```bash
+docker compose logs backend | grep 'mail:'
+```
+
+The check proves the server accepts the connection and the login. It cannot prove a message will
+reach an inbox — nothing here can, and "sent" in this project always means *accepted by the mail
+server*. The failure line carries an `error_class`;
+[`DEPLOYMENT.md § 7`](./DEPLOYMENT.md#7-troubleshooting) lists the common ones.
+
+### 2.4 Who may claim setup
+
+```dotenv
+SETUP_OWNER_EMAIL=you@yourcompany.com
+```
+
+Until first-run setup completes, whoever reaches the dashboard first can become its owner. This closes
+that window: only this address can receive the confirmation link. Set it to the address you will use
+yourself. It is optional — without it the backend warns `SETUP IS OPEN` at boot, and you can instead
+keep the dashboard on loopback until you have claimed it — but there is little reason to leave it out.
+
+### 2.5 Start the stack and create your account
 
 ```bash
 docker compose up -d --build
 ```
 
-Then open **http://localhost:3000** and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+Then open **http://localhost:3000**. On a fresh database it sends you to **`/setup`**:
+
+1. enter your email (the `SETUP_OWNER_EMAIL` address) and your name;
+2. open the confirmation email and follow its link — it lasts an hour;
+3. choose a password of at least 15 characters (a few unrelated words make a good one);
+4. sign in.
+
+That creates the **owner** account and locks setup for good. Invite everyone else from **Users &
+roles**. The same steps with what you should see at each one are
+[`DEPLOYMENT.md` step 5](./DEPLOYMENT.md#step-5--create-the-owner-account-then-sign-in).
+
+> **No email?** `docker compose exec backend npm run auth:admin:dist -- setup-link --email you@yourcompany.com --name "Your Name"`
+> prints the same link on the terminal.
 
 Trigger the first sync from the **Sync** page, and read
 [`DEPLOYMENT.md § 4`](./DEPLOYMENT.md#4-the-first-sync) before you do — `/healthz` answers `503`
@@ -356,11 +503,13 @@ where a **container** path was needed. See the mount note in **3.4**.
 ### Compose warns `The "xyz" variable is not set. Defaulting to a blank string.`
 
 Compose interpolates `$` in `env_file` values, and it will silently eat `$name` out of your value.
-Service-account keys are base64 (`A–Z a–z 0–9 + / =`) and contain no `$`, so this should not happen —
-but if it does, escape each `$` as `$$`, and re-check the value with:
+Service-account keys are base64 (`A–Z a–z 0–9 + / =`) and contain no `$`, so for them this should not
+happen — but an **SMTP password** can easily contain one, and then the symptom is a mail login that
+fails although the password is right. Escape each `$` as `$$`, or single-quote the whole value
+(`SMTP_PASS='pa$sword'`), and re-check with:
 
 ```bash
-docker compose config | grep GCP_SERVICE_ACCOUNT_JSON
+docker compose config | grep -E 'GCP_SERVICE_ACCOUNT_JSON|SMTP_PASS'   # prints the secrets: your terminal only
 ```
 
 ### `Access Denied` / `Permission denied` from BigQuery
@@ -373,6 +522,17 @@ two different places — see the table in **3.3**.
 
 The GA4 export is forward-only. If you linked it today, the first `events_YYYYMMDD` table appears
 tomorrow. Nothing is wrong.
+
+### The setup email, an invitation or a password reset does not arrive
+
+Spam folder first. Then the backend log — `docker compose logs backend | grep -E 'mail:|auth:'` —
+which says whether the message was handed to the mail server and, if it was not, why: the address is
+not allowed to claim setup, a per-address throttle, a send cap, or a mail-server error with its
+`error_class`. The screens never say which, on purpose (they must not reveal who has an account);
+the log does. The common mail-server errors and their fixes are in
+[`DEPLOYMENT.md § 7`](./DEPLOYMENT.md#7-troubleshooting). Whatever the cause, the recovery CLI can
+print the link instead — `DEPLOYMENT.md`,
+[Account recovery (CLI)](./DEPLOYMENT.md#account-recovery-cli).
 
 ### Everything else
 
@@ -406,5 +566,6 @@ tomorrow. Nothing is wrong.
   key from the service account's **Keys** tab; deletion is immediate.
 - **Two roles, no more.** If the key leaks, `dataViewer` on one dataset plus `jobUser` is the whole
   blast radius.
-- **The `.env` holds your admin password, JWT secret and Partner API token too.** It is the single
-  most sensitive file in the deployment. `chmod 600 .env` is not paranoid.
+- **The `.env` holds your SMTP password, JWT secret and Partner API token too.** The SMTP password
+  can send mail as you. It is the single most sensitive file in the deployment. `chmod 600 .env` is
+  not paranoid.

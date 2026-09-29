@@ -43,13 +43,14 @@ img {
 }
 
 /* =============================================================================
-   Sign-in screen — the one page with no nav and no Frame around it.
+   Sign-in and the other public pages — no nav and no Frame around them.
    =============================================================================
 
-   Two classes, both scoped with a `login-` prefix and used only by pages/login.js.
-   They exist because centring a fixed-width card in the viewport is layout, and
-   Polaris's Page/Layout components are built for a screen that has an app frame
-   around it — which this page deliberately does not.
+   Two classes, both scoped with a `login-` prefix and used only through
+   components/auth/AuthPanel.js (sign-in, setup, invitation and password-reset
+   pages). They exist because centring a fixed-width card in the viewport is
+   layout, and Polaris's Page/Layout components are built for a screen that has an
+   app frame around it — which these pages deliberately do not.
 
    `min-height: 100dvh` rather than `100vh`: on mobile browsers the `vh` unit is
    measured against the viewport WITHOUT the collapsing address bar, so a 100vh
@@ -72,4 +73,19 @@ img {
 .login-panel {
     width: 100%;
     max-width: 26rem;
+}
+
+/* A shell command shown on a public page (the setup page's CLI fallback when mail
+   is failing). The panel is 26rem wide and a command does not break at spaces the
+   way prose does, so without `overflow-wrap: anywhere` it would push the card
+   wider than a phone screen. Scoped by class; no element selector. */
+.auth-code {
+    display: block;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    background: var(--p-color-bg-surface-secondary, #f1f1f1);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8125rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }

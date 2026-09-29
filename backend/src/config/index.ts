@@ -96,7 +96,7 @@ const _int = (raw: string | undefined, fallback: number): number => {
  *   NOT TRUSTING ENOUGH — every request then appears to come from whichever machine actually
  *   opened the socket, which behind a proxy is the proxy. All callers share one bucket, so the
  *   limit becomes per-deployment rather than per-address: brute force is still stopped, but
- *   anyone who can reach the login can spend the whole budget and keep the operator out of it
+ *   anyone who can reach the login can spend the whole budget and keep everyone else out of it
  *   until the window rolls.
  *
  * THE DEFAULT IS `false` — Express's own — because only one of those two failures is silent. An
@@ -157,6 +157,44 @@ const _bqDataset = _str(process.env.BQ_DATASET);
 const _bqServiceAccountJson = _str(process.env.GCP_SERVICE_ACCOUNT_JSON);
 const _bqAdcCredentialsPath = _str(process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
+/** Gmail's SMTP host — the one host whose password gets the whitespace treatment in `_smtpPass`. */
+const GMAIL_SMTP_HOST = 'smtp.gmail.com';
+
+/**
+ * Reads `SMTP_PASS`.
+ *
+ * `_str` trims the ends only. For `smtp.gmail.com` all internal whitespace is also removed, because
+ * Google displays an app password as four groups of four letters and a paste keeps the spaces —
+ * Gmail then answers `535 Username and Password not accepted`, which reads as "wrong password".
+ * Nothing else ever alters the secret: any other server's password may legitimately contain spaces.
+ *
+ * @param raw - The raw `process.env` value.
+ * @param host - The resolved SMTP host.
+ * @returns The password, or '' when unset.
+ */
+const _smtpPass = (raw: string | undefined, host: string): string => {
+    const value = _str(raw);
+    if (host.toLowerCase() === GMAIL_SMTP_HOST) {
+        return value.replace(/\s+/g, '');
+    }
+    return value;
+};
+
+/*
+ * The MAIL values that other MAIL fields are derived from, read once here for the same reason as
+ * the BigQuery block above: a derived field cannot see its siblings from inside the literal.
+ */
+const _smtpHost = _str(process.env.SMTP_HOST);
+const _smtpSecure = process.env.SMTP_SECURE === 'true';
+const _smtpUser = _str(process.env.SMTP_USER);
+// SMTP_FROM falls back to SMTP_USER only when that is an address. Many relays log in with a
+// username that is not one (SendGrid's is literally `apikey`), and a From built from it would be
+// refused by every receiving server.
+let _smtpFrom = _str(process.env.SMTP_FROM);
+if (!_smtpFrom && _smtpUser.includes('@')) {
+    _smtpFrom = _smtpUser;
+}
+
 const config = {
 
     // ── APP ─────────────────────────────────────────────────────────────────
@@ -181,6 +219,20 @@ const config = {
          * of getting it wrong fail in opposite directions.
          */
         TRUST_PROXY: _trustProxy(process.env.TRUST_PROXY),
+        /**
+         * The address people open the dashboard at, e.g. `https://analytics.example.com`.
+         * TIER-1. Trailing slashes are stripped.
+         *
+         * ⚠️ EVERY LINK IN AN EMAIL IS BUILT FROM THIS, AND FROM NOTHING ELSE. Never from the
+         * request's Host, protocol or `X-Forwarded-*` headers: those are written by whoever sends
+         * the request, so a password-reset link built from them points wherever an attacker says
+         * and delivers the victim's token there. The lint config refuses those reads in `src/`.
+         *
+         * It must be the PUBLIC address — not `http://backend:8080`, which is where the dashboard
+         * proxies to inside the compose network and opens nowhere else. Validation warns on that
+         * shape and on a loopback host.
+         */
+        PUBLIC_URL: _str(process.env.APP_PUBLIC_URL).replace(/\/+$/, ''),
     },
 
     // ── MONGO ───────────────────────────────────────────────────────────────
@@ -220,54 +272,51 @@ const config = {
     },
 
     // ── AUTH ────────────────────────────────────────────────────────────────
-    // Single-operator authentication. This backend holds one company's revenue
-    // history, so the security model is deliberately small: one admin account,
-    // one signing secret, and every `/api/*` route behind the guard. There is no
-    // sign-up, no password reset, and no second user — features whose absence is
-    // the point rather than a gap.
+    // Multi-user sign-in. People get an account in exactly two ways: the
+    // first-run setup screen, which creates the owner and then locks for good
+    // (a persisted flag, never re-derived from a user count), and an emailed
+    // invitation from someone already inside. There is no public sign-up.
+    // Forgotten passwords are recovered by an emailed, single-use, short-lived
+    // link — which is why MAIL below is required rather than optional.
     AUTH: {
         /**
          * HMAC secret for session tokens. TIER-1, no default.
          *
          * A default here would be worse than useless: every self-hosted install
-         * would share it, and anyone could mint a valid admin token for anyone
-         * else's dashboard. Validation additionally rejects a short secret.
+         * would share it, and anyone could mint a correctly signed token for
+         * anyone else's dashboard. Validation additionally rejects a short secret.
          */
         JWT_SECRET: _str(process.env.JWT_SECRET),
         /** Issued-token lifetime. Re-login is a password prompt, so this can be short. */
         TOKEN_TTL_HOURS: _int(process.env.AUTH_TOKEN_TTL_HOURS, 12),
-        /** The single operator account's login. TIER-1. */
-        ADMIN_EMAIL: _str(process.env.ADMIN_EMAIL),
         /**
-         * bcrypt hash of the operator password — NEVER the password itself.
-         * TIER-1.
+         * Whether `ADMIN_EMAIL`, `ADMIN_PASSWORD` or `ADMIN_PASSWORD_HASH` is
+         * still set. Read ONLY so validation can warn that they are ignored.
          *
-         * Storing a plaintext password in the environment would put it in
-         * `ps`, in shell history, in the PM2 dump and in every container
-         * inspect. Generate one with:
-         *
-         *     node -e "console.log(require('bcryptjs').hashSync(process.argv[1], 12))" 'your password'
+         * They configured the single-operator build, and this build never reads
+         * their VALUES — not for sign-in, not for setup, not for logging. They
+         * are left in place deliberately until the operator is sure they will not
+         * roll back, because the single-operator build still reads them.
          */
-        ADMIN_PASSWORD_HASH: _str(process.env.ADMIN_PASSWORD_HASH),
+        LEGACY_ADMIN_ENV_PRESENT: Boolean(
+            _str(process.env.ADMIN_EMAIL) || _str(process.env.ADMIN_PASSWORD) || _str(process.env.ADMIN_PASSWORD_HASH)
+        ),
         /**
-         * The operator password in PLAINTEXT — the simple path, hashed at first
-         * boot and never stored in this form.
+         * Pins which email address may claim first-run setup. Optional, and
+         * lowercased here.
          *
-         * `ADMIN_PASSWORD_HASH` above is preferred and WINS when both are set:
-         * a plaintext password in the environment is readable in `ps`, in shell
-         * history, in a PM2 dump and in `docker inspect`, and it stays readable
-         * for as long as the process runs.
-         *
-         * This exists anyway because "put your password in .env" is what a
-         * self-hoster expects to do, and a setup step that opens with a bcrypt
-         * one-liner is where people close the tab. `.env.example` documents this
-         * variable; the hash is the hardening step for an operator who wants it.
-         *
-         * Read ONCE, by `seedAdminIfMissing`, on a database with no operator
-         * account. Changing it afterwards does nothing — the account already
-         * exists and the seeder never rewrites one.
+         * Without it, setup is restricted to the accounts left by a
+         * single-operator build when there are any, and is otherwise FIRST-COME:
+         * whoever reaches the setup screen first becomes the owner. Setting this
+         * closes that window. Never printed — boot logs only whether it is set.
          */
-        ADMIN_PASSWORD: _str(process.env.ADMIN_PASSWORD),
+        SETUP_OWNER_EMAIL: _str(process.env.SETUP_OWNER_EMAIL).toLowerCase(),
+        /** How long the setup-verification link stays usable, in minutes. */
+        SETUP_TOKEN_TTL_MINUTES: _int(process.env.AUTH_SETUP_TOKEN_TTL_MINUTES, 60),
+        /** How long an invitation link stays usable, in hours. The invite service clamps it to 1..168. */
+        INVITE_TTL_HOURS: _int(process.env.AUTH_INVITE_TTL_HOURS, 72),
+        /** How long a password-reset link stays usable, in minutes. Short: it is a bearer credential in an inbox. */
+        PASSWORD_RESET_TTL_MINUTES: _int(process.env.AUTH_PASSWORD_RESET_TTL_MINUTES, 30),
         /** Cost factor used when hashing at runtime. 12 is ~250ms on modern hardware. */
         BCRYPT_ROUNDS: _int(process.env.AUTH_BCRYPT_ROUNDS, 12),
         /**
@@ -276,8 +325,11 @@ const config = {
          * `POST /api/auth/login` in `src/apps/app.ts`.
          *
          * ONLY REJECTED CREDENTIALS COUNT. A successful sign-in is never
-         * charged and clears the address's tally outright, so ordinary daily
-         * use never walks toward the limit.
+         * charged, so ordinary daily use never walks toward the limit. It
+         * clears nothing either: with more than one account, a success that
+         * wiped the tally let any member reset it between guesses at another
+         * account's password. A browser that has signed in before gets a
+         * device budget of its own (see the middleware).
          *
          * ⚠️ "PER SOURCE ADDRESS" IS AS TRUE AS `TRUST_PROXY` IS CORRECT. This
          * backend always sits behind the dashboard's server-side proxy, so with
@@ -296,19 +348,103 @@ const config = {
         /**
          * How long that tally lives before it is discarded, in minutes.
          *
-         * This is the whole of the recovery story, and it is why nothing about
-         * a failed login is persisted anywhere: the refusal EXPIRES. There is no
-         * lockout flag on the account, no counter in the database and no state
-         * that survives a restart, so the worst an operator who has forgotten
-         * their password can do to themselves is wait this long — on a
-         * deployment with one account and no password-reset flow, that property
-         * matters more than a tighter limit would.
+         * Nothing about a failed login is persisted anywhere: the refusal
+         * EXPIRES. There is no lockout flag on the account, no counter in the
+         * database and no state that survives a restart, so the worst anyone can
+         * do to an account by guessing at it is make its owner wait this long.
+         * A lockout that an attacker can trigger is a denial of service with
+         * extra steps.
          *
          * A value of zero or less is treated as the 15-minute default rather
          * than as "never expires": a window that never rolls IS the permanent
          * lockout this design refuses to have.
          */
         LOGIN_RATE_LIMIT_WINDOW_MINUTES: _int(process.env.AUTH_LOGIN_RATE_LIMIT_WINDOW_MINUTES, 15),
+        /**
+         * Budget for EACH of the rate limiters on the public account flows —
+         * the emailed-link pages (keyed on the token itself), forgot-password
+         * and the setup request (both keyed on the source address). Enforced by
+         * `src/middlewares/authFlowRateLimit.ts`. Each limiter has its own
+         * budget: spending one never throttles another, or sign-in.
+         */
+        PUBLIC_FLOW_RATE_LIMIT_MAX: _int(process.env.AUTH_PUBLIC_FLOW_RATE_LIMIT_MAX, 10),
+        /** The window those budgets roll over, in minutes. */
+        PUBLIC_FLOW_RATE_LIMIT_WINDOW_MINUTES: _int(process.env.AUTH_PUBLIC_FLOW_RATE_LIMIT_WINDOW_MINUTES, 15),
+    },
+
+    // ── MAIL ────────────────────────────────────────────────────────────────
+    // Outgoing email, REQUIRED. Setup verification, invitations, password
+    // resets and "your password was changed" notices all travel by email, and
+    // the dashboard deliberately has no copy-this-link fallback: a link shown on
+    // screen to whoever is signed in is a link handed to the wrong person the
+    // first time an account is shared. (The recovery CLI can print one for
+    // someone with shell access, which is a different trust level.)
+    //
+    // Any SMTP server, or Gmail with an app password. "Sent" anywhere in this
+    // codebase means ACCEPTED BY THIS SERVER — never delivered.
+    MAIL: {
+        /** SMTP server host name, e.g. `smtp.gmail.com`. TIER-1. */
+        SMTP_HOST: _smtpHost,
+        /**
+         * Implicit TLS from the first byte — the port-465 style. Leave unset for
+         * port 587, where the connection upgrades with STARTTLS instead (and
+         * `SMTP_ALLOW_INSECURE` below decides whether that upgrade is REQUIRED).
+         */
+        SMTP_SECURE: _smtpSecure,
+        /** Defaults to 465 when `SMTP_SECURE=true`, else 587. Validation warns on the mismatched pairs. */
+        SMTP_PORT: _int(process.env.SMTP_PORT, _smtpSecure ? 465 : 587),
+        /**
+         * ⚠️ NEGATIVE SWITCH, for a local test relay only. Default false, which
+         * means STARTTLS is REQUIRED on a non-implicit-TLS connection and the
+         * server certificate is VERIFIED. `true` allows a plaintext session and
+         * any certificate — the SMTP password and every link in every email are
+         * then readable and alterable by anything on the network path. Boot warns
+         * loudly while it is set.
+         */
+        SMTP_ALLOW_INSECURE: process.env.SMTP_ALLOW_INSECURE === 'true',
+        /**
+         * Login for the SMTP server. `SMTP_USER` and `SMTP_PASS` are set
+         * together or not at all (a relay that accepts mail without a login);
+         * one without the other is a configuration error.
+         */
+        SMTP_USER: _smtpUser,
+        /**
+         * SMTP password. A secret: no default, never logged. See `_smtpPass`
+         * for the one transformation it ever gets (Gmail app-password spaces).
+         */
+        SMTP_PASS: _smtpPass(process.env.SMTP_PASS, _smtpHost),
+        /**
+         * The sender ADDRESS — a bare address, no display name (that goes in
+         * `SMTP_FROM_NAME`). Falls back to `SMTP_USER` when that is an address.
+         * TIER-1 on the resolved value.
+         */
+        SMTP_FROM: _smtpFrom,
+        /** Display name on the From line. */
+        SMTP_FROM_NAME: _str(process.env.SMTP_FROM_NAME, 'Shopify App Analytics'),
+        /**
+         * Process-wide caps on messages handed to the server. Defaults sit well
+         * under Gmail's 500-a-day ceiling for a personal account, which
+         * suspends sending outright when crossed. Mail triggered by an anonymous
+         * request (setup verification, forgot-password) may use at most half of
+         * each, so nobody outside can spend the budget that invitations and
+         * security notices need. Zero means NO mail is sent — validation warns.
+         */
+        MAX_PER_HOUR: _int(process.env.EMAIL_MAX_PER_HOUR, 30),
+        MAX_PER_DAY: _int(process.env.EMAIL_MAX_PER_DAY, 200),
+        /*
+         * Socket timeouts, fixed rather than configurable: they bound how long a
+         * dead mail server can hold a request, and no deployment is served by a
+         * longer one. Nodemailer's own defaults are minutes.
+         */
+        CONNECTION_TIMEOUT_MS: 10000,
+        GREETING_TIMEOUT_MS: 10000,
+        SOCKET_TIMEOUT_MS: 30000,
+        /**
+         * Whether mail is configured AT ALL — derived, never set directly. A host
+         * to talk to and an address to send from; credentials are optional
+         * because an auth-less relay is a legitimate setup.
+         */
+        ENABLED: Boolean(_smtpHost && _smtpFrom),
     },
 
     // ── PARTNER ─────────────────────────────────────────────────────────────
@@ -604,6 +740,7 @@ const config = {
 Object.freeze(config.APP);
 Object.freeze(config.MONGO);
 Object.freeze(config.AUTH);
+Object.freeze(config.MAIL);
 Object.freeze(config.PARTNER);
 Object.freeze(config.REVENUE);
 Object.freeze(config.SYNC);

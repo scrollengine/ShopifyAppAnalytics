@@ -4,7 +4,7 @@ import { useRouter } from 'next/router';
 import SideNavBar from '../../components/sideNavBar';
 import LoaderContext from '../../contexts/loaderContext';
 import { APPS_STATE, useGrowthIntel } from '../../contexts/growthIntelContext';
-import GrowthIntelFunnelApiService from '../../API_Services/growth-intel/funnelService';
+import { useSession } from '../../contexts/sessionContext';
 import GrowthIntelHealthApiService from '../../API_Services/growth-intel/healthService';
 import GrowthIntelMetaApiService from '../../API_Services/growth-intel/metaService';
 import GrowthIntelSyncApiService from '../../API_Services/growth-intel/syncService';
@@ -14,6 +14,7 @@ import SyncJobHistoryTable from '../../components/growth-intel/SyncJobHistoryTab
 import SyncStatusBadge from '../../components/growth-intel/SyncStatusBadge';
 import { SYNC_CATEGORIES } from '../../components/growth-intel/syncCategories';
 import { DASHBOARD_ROUTES } from '../../utils/dashboardRoutes';
+import { canViewPage, permissionLabel, syncTriggerPermissionFor } from '../../utils/permissions';
 
 /**
  * =============================================================================
@@ -85,32 +86,45 @@ import { DASHBOARD_ROUTES } from '../../utils/dashboardRoutes';
  *  wired straight to it would look like it worked and quietly manufacture FAILED
  *  rows.
  *
- *  So this page ESTABLISHES the tier's state first, from `GET /api/funnel` — the
- *  read endpoint whose refusal carries that same named message (over HTTP 500,
- *  which `funnelService` deliberately passes through intact). Four outcomes, and
- *  each drives the buttons differently:
+ *  So this page reads the tier's state from `GET /api/sync/health`, which
+ *  publishes `listing_tier_connected` — the backend's own `BIGQUERY.ENABLED`, the
+ *  same flag every billed path checks before it spends anything. Four outcomes,
+ *  and each drives the buttons differently:
  *
- *    connected — `status: true`. Buttons live. `last_bq_synced_at` arrives in the
- *      same payload and feeds the card's last-run, and a null one THERE is a
- *      known "never synced" rather than an unknown.
- *    not_configured — `status: false` and the message names a BigQuery variable.
- *      Buttons DISABLED, carrying that message plus what setting the variables
- *      unlocks. Offering a button that queues a job which cannot succeed is not
- *      an affordance, it is a trap.
- *    loading — the probe is in flight. Disabled, briefly, saying so.
- *    unknown — any other failure. Buttons LEFT ENABLED with a caution: we could
- *      not read the tier's state, and disabling on that would block a legitimate
- *      sync over an assumption about our own blind spot.
+ *    connected — `true`. Buttons live.
+ *    not_configured — `false`. Buttons DISABLED, saying which variables configure
+ *      the tier and what setting them unlocks. Offering a button that queues a
+ *      job which cannot succeed is not an affordance, it is a trap.
+ *    loading — the health read is in flight. Disabled, briefly, saying so.
+ *    unknown — the health read failed, or answered without the field. Buttons
+ *      LEFT ENABLED with a caution: we could not read the tier's state, and
+ *      disabling on that would block a legitimate sync over an assumption about
+ *      our own blind spot.
  *
- *  ⚠️ The BigQuery probe is still worth making even though `sync/health` reports
- *  `last_bq_synced_at` directly: the watermark says when the rollups last ran,
- *  and the probe says whether they COULD run now. An app that synced last month
- *  and had its credentials removed yesterday has a fresh watermark and a dead
- *  tier, and only the probe can tell you the second half.
+ *  ⚠️ IT USED TO PROBE `GET /api/funnel` INSTEAD, and that made the answer depend
+ *  on a permission this page does not need. The funnel read requires
+ *  `analytics:read`; a role that holds only `sync:read` and `sync:run_billed`
+ *  would have had every probe refused and the tier reported as "could not be
+ *  established" on the one screen whose job is to say whether syncs can run.
+ *  `sync/health` is gated by `sync:read`, which is the permission that opens this
+ *  page, so the page can always read what it shows.
+ *
+ *  The watermark and the flag answer different questions and both are shown:
+ *  `apps[].last_bq_synced_at` says when the rollups last ran, the flag says
+ *  whether they COULD run now. An app that synced last month and had its
+ *  credentials removed yesterday has a fresh watermark and a dead tier.
+ *
+ *  ── WHO MAY PRESS WHICH BUTTON ──────────────────────────────────────────────
+ *  Reading this page needs `sync:read`. STARTING a job needs `sync:run` (the
+ *  Partner API sync and the smoke job) or `sync:run_billed` (anything that scans
+ *  BigQuery, the free dry-run estimate included, because it is the same route).
+ *  A role without the key sees the card with its buttons disabled and a sentence
+ *  naming the role and the missing permission — never a hidden card, because the
+ *  card is also where the last run is reported, and that is readable by anyone
+ *  who can open the page.
  * =============================================================================
  */
 
-const FUNNEL_API = new GrowthIntelFunnelApiService();
 const HEALTH_API = new GrowthIntelHealthApiService();
 const META_API = new GrowthIntelMetaApiService();
 const SYNC_API = new GrowthIntelSyncApiService();
@@ -139,19 +153,14 @@ const DUMMY_JOB_TYPE = 'DUMMY';
 const TRIGGERABLE_JOB_TYPES = [PARTNER_JOB_TYPE, BIGQUERY_JOB_TYPE, ATTRIBUTION_JOB_TYPE, DUMMY_JOB_TYPE];
 
 /**
- * The environment variables the backend names when the BigQuery tier is not configured.
+ * What configures the BigQuery tier, in the API's environment.
  *
- * These three strings are how "not connected" is told apart from every other refusal the funnel
- * endpoint can answer with ('Partner app not found.', 'partner_app_id is required.', a thrown
- * read). The refusal is built by `describeBigQueryConfigGap` on the server and always names at
- * least one of them; no other message on that path mentions any.
- *
- * ⚠️ `GOOGLE_APPLICATION_CREDENTIALS` is deliberately absent. It is the ALTERNATIVE to
- * `GCP_SERVICE_ACCOUNT_JSON`, not a fourth requirement — it appears inside the credentials clause of
- * the server's message, so matching on it would report it as "missing" every time the pair is
- * unsatisfied and imply both must be set. The message itself explains the either/or.
+ * `listing_tier_connected` is a boolean, so it cannot say WHICH of these is missing — the job's own
+ * failure message does that, one poll later. This names the whole set so the reader knows where to
+ * look. It mirrors `BIGQUERY.ENABLED` in the backend's `config/index.ts`: a project, a dataset, and
+ * credentials — either a service-account key or Google's Application Default Credentials.
  */
-const BIGQUERY_ENV_KEYS = ['GCP_PROJECT_ID', 'BQ_DATASET', 'GCP_SERVICE_ACCOUNT_JSON'];
+const BIGQUERY_CONFIG_SENTENCE = 'The API\'s environment does not configure BigQuery: it needs GCP_PROJECT_ID, BQ_DATASET, and credentials — GCP_SERVICE_ACCOUNT_JSON, or GOOGLE_APPLICATION_CREDENTIALS when running on Google Cloud.';
 
 /** What the GA4 tier buys, in the reader's terms. Shown wherever the buttons are refused. */
 const BIGQUERY_UNLOCKS = 'Connecting it fills the Traffic Sources page (source/medium and country breakdowns) and the listing-view steps at the top of the Funnel page — views, install clicks, installs. Until then those read as unavailable rather than as zero.';
@@ -527,6 +536,7 @@ const SyncStatusPage = () => {
     const router = useRouter();
     const { showToast, toastMarkup } = useContext(LoaderContext) || {};
     const { appId, selectedApp, apps, appsState, appsError, refreshApps, hydrated } = useGrowthIntel();
+    const session = useSession();
 
     const [health, setHealth] = useState(null);
     // 'loading' · 'answered' (200 or 503, both real readings) · 'silent' (nothing responded at all).
@@ -548,15 +558,6 @@ const SyncStatusPage = () => {
     const [sessionJobs, setSessionJobs] = useState([]);
     const [lookupId, setLookupId] = useState('');
     const [lookupBusy, setLookupBusy] = useState(false);
-
-    // The BigQuery tier, established from GET /api/funnel — see the file header.
-    // 'idle' (no app selected) · 'loading' · 'connected' · 'not_configured' · 'unknown'.
-    const [bqState, setBqState] = useState('idle');
-    const [bqMessage, setBqMessage] = useState('');
-    const [bqMissingEnv, setBqMissingEnv] = useState([]);
-    // The BIGQUERY_SYNC watermark, readable only while the tier answers. Null is ambiguous on its
-    // own — pair it with `bqState` before deciding whether it means "never" or "we cannot tell".
-    const [bqLastSyncedAt, setBqLastSyncedAt] = useState(null);
 
     /**
      * Reads `GET /healthz`.
@@ -609,71 +610,6 @@ const SyncStatusPage = () => {
     }, [appId, hydrated]);
 
     /**
-     * Establishes whether the BigQuery tier is connected, from `GET /api/funnel`.
-     *
-     * THE ONLY HONEST WAY TO ANSWER THIS FROM THE BROWSER. Nothing publishes the tier's
-     * configuration directly, and the trigger endpoint accepts a job whether or not it can run —
-     * so asking the enqueue path would always answer "yes". The funnel read refuses with the
-     * server's own message naming the missing variable, which is both the signal AND the text an
-     * operator needs.
-     *
-     * `period_days: 1` because the answer wanted is the ENVELOPE, not the numbers: a one-day window
-     * is the cheapest read that still carries `data_state` and `last_bq_synced_at`. The endpoint
-     * queries Mongo only — it can never start a billed BigQuery scan.
-     *
-     * @returns {void}
-     */
-    const loadBigQueryProbe = useCallback(() => {
-        if (!appId || !hydrated) {
-            setBqState('idle');
-            setBqMessage('');
-            setBqMissingEnv([]);
-            setBqLastSyncedAt(null);
-            return;
-        }
-        setBqState('loading');
-        FUNNEL_API.getFunnel({ partner_app_id: appId, period_days: 1 }, (resp) => {
-            if (resp && resp.status && resp.data) {
-                // A null watermark here is a KNOWN never-synced — the server read the app row and
-                // told us — so it is passed through as-is rather than reported as unknown. It is a
-                // FALLBACK now rather than the only source: `sync/health` publishes the same field
-                // on `apps[]` and does so whether or not the tier is reachable, which is the answer
-                // the card prefers.
-                setBqLastSyncedAt(resp.data.last_bq_synced_at || null);
-                setBqMessage('');
-                setBqMissingEnv([]);
-                setBqState('connected');
-                return;
-            }
-
-            setBqLastSyncedAt(null);
-
-            let msg = '';
-            if (resp && resp.msg) {
-                msg = resp.msg;
-            }
-            const missing = BIGQUERY_ENV_KEYS.filter((key) => msg.indexOf(key) !== -1);
-            if (missing.length > 0) {
-                setBqMissingEnv(missing);
-                setBqMessage(msg);
-                setBqState('not_configured');
-                return;
-            }
-
-            // Anything else — a 401 mid-redirect, a thrown read, an app the API does not know. We
-            // did not learn the tier's state, and claiming either answer would be a guess. The
-            // buttons stay live; the note says why.
-            setBqMissingEnv([]);
-            let reason = 'The listing-analytics endpoint did not answer, so whether BigQuery is connected could not be established.';
-            if (msg) {
-                reason = msg;
-            }
-            setBqMessage(reason);
-            setBqState('unknown');
-        });
-    }, [appId, hydrated]);
-
-    /**
      * Reads `GET /api/sync/health` — the last run of every job type, every app's watermarks, what is
      * armed, and how many rows each collection holds.
      *
@@ -709,7 +645,6 @@ const SyncStatusPage = () => {
 
     useEffect(() => { loadHealth(); }, [loadHealth]);
     useEffect(() => { loadCoverage(); }, [loadCoverage]);
-    useEffect(() => { loadBigQueryProbe(); }, [loadBigQueryProbe]);
     useEffect(() => { loadSyncHealth(); }, [loadSyncHealth]);
 
     /**
@@ -726,9 +661,6 @@ const SyncStatusPage = () => {
         setHistoryRefreshKey((key) => key + 1);
         loadHealth();
         loadCoverage();
-        // A finished BIGQUERY_SYNC moves `last_bq_synced_at`, and a finished anything may have been
-        // the run that first connected the tier. Cheaper to re-read than to reason about which.
-        loadBigQueryProbe();
         // Any terminal job moves `last_run_per_type`, and a successful one moves both a watermark
         // and `last_success_per_type`. Re-read rather than patch the held payload: a locally applied
         // edit is a second copy of the server's rules about which watermark a job type advances.
@@ -741,7 +673,7 @@ const SyncStatusPage = () => {
             next.unshift(job);
             return next.slice(0, 20);
         });
-    }, [loadHealth, loadCoverage, loadBigQueryProbe, loadSyncHealth]);
+    }, [loadHealth, loadCoverage, loadSyncHealth]);
 
     /**
      * Reads one job by id through `GET /api/sync/jobs/:job_id` and adds it to the list.
@@ -787,6 +719,26 @@ const SyncStatusPage = () => {
         });
     }, [lookupId, showToast]);
 
+    // ── Whether THIS ROLE may start each job ─────────────────────────────────────────────────
+    // A sentence per card, '' when allowed. It names the role and the missing permission, because
+    // "disabled" with no reason reads as broken and the remedy (ask an Owner or Admin) is nowhere
+    // on this page.
+    let roleLabel = 'your role';
+    if (session.role && session.role.label) {
+        roleLabel = session.role.label;
+    }
+    const _permissionReasonFor = (jobType) => {
+        const key = syncTriggerPermissionFor(jobType);
+        if (session.can(key)) {
+            return '';
+        }
+        return `The ${roleLabel} role does not include ${permissionLabel(key)}, so this cannot be started from your account. An Owner or Admin can run it, or change your role.`;
+    };
+    const partnerPermissionReason = _permissionReasonFor(PARTNER_JOB_TYPE);
+    const bigQueryPermissionReason = _permissionReasonFor(BIGQUERY_JOB_TYPE);
+    const attributionPermissionReason = _permissionReasonFor(ATTRIBUTION_JOB_TYPE);
+    const dummyPermissionReason = _permissionReasonFor(DUMMY_JOB_TYPE);
+
     // ── Readiness ────────────────────────────────────────────────────────────────────────────
     let healthBadge = <Badge tone="new">unknown</Badge>;
     let healthReason = 'Reading the backend readiness probe…';
@@ -810,17 +762,22 @@ const SyncStatusPage = () => {
     // place to run one, and two buttons doing the same thing is worse than one in the right spot.
     let firstSyncMarkup = null;
     if (healthState === 'answered' && health && health.state === 'warming' && appId) {
+        let firstSyncNote = 'Pulls every event and transaction from 2009 to today — this is the run that makes the rest of the dashboard answerable. It can take a while; the button polls until it finishes.';
+        if (partnerPermissionReason) {
+            firstSyncNote = partnerPermissionReason;
+        }
         firstSyncMarkup = (
             <InlineStack gap="300" blockAlign="center" wrap>
                 <ManualSyncButton
                     jobType={PARTNER_JOB_TYPE}
                     payload={{ partner_app_id: appId, mode: 'AUTO' }}
                     label="Run the first sync"
+                    disabled={Boolean(partnerPermissionReason)}
+                    disabledReason={partnerPermissionReason}
                     onFinish={handleJobFinished}
                 />
-                <Text as="span" variant="bodySm" tone="subdued">
-                    Pulls every event and transaction from 2009 to today — this is the run that makes the rest of
-                    the dashboard answerable. It can take a while; the button polls until it finishes.
+                <Text as="span" variant="bodySm" tone={partnerPermissionReason ? 'caution' : 'subdued'}>
+                    {firstSyncNote}
                 </Text>
             </InlineStack>
         );
@@ -1097,16 +1054,12 @@ const SyncStatusPage = () => {
         partnerUnknownReason = _watermarkUnknownReason(true);
     }
 
-    //  READ FROM THE APP ROW, NOT FROM THE BIGQUERY PROBE. The probe answers only while the tier
-    // is configured, so a deployment that synced last month and lost its credentials yesterday used
-    // to report the watermark as unreadable. `sync/health` reads the stored row regardless of
-    // whether BigQuery can be reached, which is the honest source for "when did this last run".
+    //  READ FROM THE APP ROW. `sync/health` reads the stored watermark whether or not BigQuery can
+    // be reached now, which is the honest source for "when did this last run": a deployment that
+    // synced last month and lost its credentials yesterday still ran last month.
     let bigQueryLastSuccess = null;
     if (healthApp && healthApp.last_bq_synced_at) {
         bigQueryLastSuccess = { completed_at: healthApp.last_bq_synced_at };
-    }
-    if (!bigQueryLastSuccess && bqLastSyncedAt) {
-        bigQueryLastSuccess = { completed_at: bqLastSyncedAt };
     }
     const bigQuerySessionSuccess = _latestSessionSuccess(sessionJobs, BIGQUERY_JOB_TYPE);
     if (bigQuerySessionSuccess) {
@@ -1148,6 +1101,23 @@ const SyncStatusPage = () => {
 
     // ── Whether the GA4 buttons may be pressed ───────────────────────────────────────────────
     // Both GA4 jobs read the same tier through the same credentials, so one verdict drives both.
+    // The verdict is `listing_tier_connected` from `sync/health` — see the file header. Only an
+    // explicit boolean counts: a payload without the field (an older backend) is 'unknown', never
+    // "not configured", because absence is a gap in our reading and not a fact about the tier.
+    //
+    // Read from the HELD snapshot whatever `syncHealthState` says: every finished job re-reads the
+    // health, and `loadSyncHealth` keeps the previous payload while it does (it clears it only on a
+    // failure). Gating on 'ready' would disable both GA4 buttons for the length of that re-read
+    // after every sync, over a flag the backend reads from its environment and cannot have changed.
+    let bqState = 'loading';
+    if (syncHealth && syncHealth.listing_tier_connected === true) {
+        bqState = 'connected';
+    } else if (syncHealth && syncHealth.listing_tier_connected === false) {
+        bqState = 'not_configured';
+    } else if (syncHealthState === 'ready' || syncHealthState === 'error') {
+        bqState = 'unknown';
+    }
+
     let bigQueryDisabled = false;
     let bigQueryDisabledReason = '';
     if (bqState === 'loading') {
@@ -1156,26 +1126,30 @@ const SyncStatusPage = () => {
     }
     if (bqState === 'not_configured') {
         bigQueryDisabled = true;
-        // The server's own sentence, verbatim, because it names the variables AND says what the
-        // emptiness is not. Rewriting it into something friendlier is how the detail an operator
-        // actually needs gets lost.
-        bigQueryDisabledReason = `Not connected, so this cannot run. Missing: ${bqMissingEnv.join(', ')}. ${bqMessage} ${BIGQUERY_UNLOCKS} Set the variables in the API's environment and restart it, then run this sync.`;
+        bigQueryDisabledReason = `Not connected, so this cannot run. ${BIGQUERY_CONFIG_SENTENCE} ${BIGQUERY_UNLOCKS} Set the variables in the API's environment and restart it, then run this sync.`;
+    }
+
+    let bigQueryUnknownMessage = 'The sync health snapshot did not say whether BigQuery is configured.';
+    if (syncHealthState === 'error' && syncHealthReason) {
+        bigQueryUnknownMessage = syncHealthReason;
     }
 
     //  Not disabled. We failed to READ the tier's state; that is a gap in our own reading, and
     // blocking a legitimate sync over it would be the same class of mistake as reporting a zero.
     let bigQueryUnknownNote = null;
     if (bqState === 'unknown') {
+        // The "left enabled" sentence is only true for a role that may press them; for one that may
+        // not, the cards already say why they are off, and this note must not contradict them.
+        let bigQueryUnknownConsequence = 'This says nothing about the tier, only that the check failed.';
+        if (!bigQueryPermissionReason || !attributionPermissionReason) {
+            bigQueryUnknownConsequence = 'The buttons above are left enabled: this says nothing about the tier, only that the check failed. If it is in fact unconfigured, the job will start and then fail naming the environment variable that is missing — which is the same answer, one poll later.';
+        }
         bigQueryUnknownNote = (
             <Card>
                 <BlockStack gap="200">
                     <Text as="h3" variant="headingSm">Whether BigQuery is connected could not be established</Text>
-                    <Text as="p" variant="bodySm" tone="subdued">{bqMessage}</Text>
-                    <Text as="p" variant="bodySm" tone="subdued">
-                        The buttons above are left enabled: this says nothing about the tier, only that the check
-                        failed. If it is in fact unconfigured, the job will start and then fail naming the
-                        environment variable that is missing — which is the same answer, one poll later.
-                    </Text>
+                    <Text as="p" variant="bodySm" tone="subdued">{bigQueryUnknownMessage}</Text>
+                    <Text as="p" variant="bodySm" tone="subdued">{bigQueryUnknownConsequence}</Text>
                 </BlockStack>
             </Card>
         );
@@ -1198,6 +1172,7 @@ const SyncStatusPage = () => {
                 lastSuccessLabel="Last success (this app)"
                 lastSuccessUnknownReason={partnerUnknownReason}
                 appId={appId}
+                permissionReason={partnerPermissionReason}
                 showToast={showToast}
                 onFinish={handleJobFinished}
                 onNavigate={(url) => router.push(url)}
@@ -1222,6 +1197,7 @@ const SyncStatusPage = () => {
                 appId={appId}
                 disabled={bigQueryDisabled}
                 disabledReason={bigQueryDisabledReason}
+                permissionReason={bigQueryPermissionReason}
                 showToast={showToast}
                 onFinish={handleJobFinished}
                 onNavigate={(url) => router.push(url)}
@@ -1246,6 +1222,7 @@ const SyncStatusPage = () => {
                 appId={appId}
                 disabled={bigQueryDisabled}
                 disabledReason={bigQueryDisabledReason}
+                permissionReason={attributionPermissionReason}
                 showToast={showToast}
                 onFinish={handleJobFinished}
                 onNavigate={(url) => router.push(url)}
@@ -1270,6 +1247,7 @@ const SyncStatusPage = () => {
                 lastSuccess={dummyLastSuccess}
                 lastSuccessUnknownReason={dummyUnknownReason}
                 appId={appId}
+                permissionReason={dummyPermissionReason}
                 showToast={showToast}
                 onFinish={handleJobFinished}
                 onNavigate={(url) => router.push(url)}
@@ -1423,13 +1401,19 @@ const SyncStatusPage = () => {
         );
     }
 
+    // Only when the Overview is a page this role can open; a back arrow onto "Restricted" is a trap.
+    let backAction;
+    if (canViewPage(session.permissions, DASHBOARD_ROUTES.OVERVIEW)) {
+        backAction = { content: 'Growth Intelligence', url: DASHBOARD_ROUTES.OVERVIEW };
+    }
+
     return (
         <SideNavBar>
             <Page
                 title="Sync & status"
                 subtitle="Whether data is flowing, when it last ran, and how far back it actually reaches."
                 fullWidth
-                backAction={{ content: 'Growth Intelligence', url: DASHBOARD_ROUTES.OVERVIEW }}
+                backAction={backAction}
             >
                 <BlockStack gap="400">
                     {noAppBanner}

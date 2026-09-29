@@ -47,9 +47,10 @@ const { listPartnerApps } = partnerModule;
  *
  * `/healthz` carries no token by design, but every service in this codebase takes an identity and
  * refuses an empty one. This is the same device the job runner uses for its own unattended writes
- * (`SYNC_WORKER`): a named, non-human caller. It grants nothing — there is one operator account and
- * no per-user scoping anywhere in this system — it only keeps the service signature uniform and
- * makes the caller identifiable in a log line.
+ * (`SYNC_WORKER`): a named, non-human caller. It grants nothing — the analytics services do no
+ * per-user scoping (what a signed-in user may read is decided by the route's permission policy,
+ * before any service runs), and this probe passes through no policy at all — it only keeps the
+ * service signature uniform and makes the caller identifiable in a log line.
  */
 const HEALTH_PROBE_USER_ID = 'HEALTH_PROBE';
 

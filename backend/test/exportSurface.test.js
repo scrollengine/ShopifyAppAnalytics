@@ -103,12 +103,13 @@ const _isSingleValueSurface = (filePath) => {
  * this was to skip `src/scripts/` wholesale — which would have silently stopped guarding
  * `src/scripts/{services,helpers,repositories,constants}`, every one of which IS a real module with a
  * published surface. An exemption that grows by directory stops being an exemption and becomes a
- * hole. If you are adding a fourth entry, it must genuinely be a file nothing imports.
+ * hole. If you are adding a fifth entry, it must genuinely be a file nothing imports.
  */
 const ENTRY_POINTS = [
     path.join('src', 'apps', 'app.ts'),
     path.join('src', 'scripts', 'seedDemo.ts'),
-    path.join('src', 'scripts', 'teardownDemo.ts')
+    path.join('src', 'scripts', 'teardownDemo.ts'),
+    path.join('src', 'scripts', 'authAdmin.ts')
 ];
 
 /**
@@ -168,7 +169,7 @@ test('every module barrel was found', () => {
     // Guards against the whole file passing because the discovery walk returned nothing.
     const relative = BARRELS.map(_rel).sort();
     assert.ok(relative.length >= 5, `Only ${relative.length} barrels discovered: ${relative.join(', ')}`);
-    for (const expected of ['auth', 'conversion', 'partner', 'revenue', 'sync']) {
+    for (const expected of ['auth', 'conversion', 'mail', 'partner', 'revenue', 'sync']) {
         assert.ok(
             relative.includes(path.join('src', 'modules', expected, 'index.ts')),
             `The ${expected} module has no index.ts barrel, or the walk missed it.`

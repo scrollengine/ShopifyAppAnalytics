@@ -18,6 +18,7 @@ import PlanMixDonut from '../../components/growth-intel/conversion/PlanMixDonut'
 import DataStateSection from '../../components/growth-intel/DataStateSection';
 import { DATA_STATE, pendingDataState, readDataState } from '../../components/growth-intel/dataState';
 import { DASHBOARD_ROUTES } from '../../utils/dashboardRoutes';
+import { permissionLabel } from '../../utils/permissions';
 
 const FUNNEL_API = new GrowthIntelFunnelApiService();
 const CONV_API = new GrowthIntelConversionApiService();
@@ -397,9 +398,19 @@ const FunnelPage = () => {
                     <p>{funnel.data.unknown_reason || EMPTY_WINDOW_FALLBACK}</p>
                 </Banner>
             );
+        } else if (funnel.state === DATA_STATE.FORBIDDEN) {
+            // A restriction, not a failure: info, in DataStateSection's words. And NO "the steps below
+            // are unaffected" — every step on this page needs analytics:read too (GET
+            // /api/conversion/funnel included), so each of them is restricted as well and says so.
+            acquisitionBanner = (
+                <Banner tone="info" title={`Restricted — your role does not include ${permissionLabel(funnel.permission)}`}>
+                    <p>Listing analytics is not shown. This says nothing about the data, only about what your role may read. An Owner or Admin can change your role.</p>
+                </Banner>
+            );
         } else if (funnel.state !== DATA_STATE.READY && funnel.state !== DATA_STATE.PENDING) {
-            // ERROR, and NOT_IMPLEMENTED should this route ever be stubbed out. Both carry a message
-            // the operator can act on, and neither is a statement about the listing's traffic.
+            // ERROR, and NOT_IMPLEMENTED should this route ever be stubbed out (FORBIDDEN is handled
+            // above). Both carry a message the operator can act on, and neither is a statement about
+            // the listing's traffic.
             acquisitionBanner = (
                 <Banner tone={funnel.notImplemented ? 'warning' : 'critical'} title="Listing analytics could not be loaded">
                     <p>{funnel.reason}</p>

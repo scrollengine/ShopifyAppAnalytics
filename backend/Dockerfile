@@ -31,8 +31,22 @@
 #  missing .env is a no-op rather than an error.
 #
 #  Required (the process refuses to boot without them, naming the one it wants):
-#      MONGO_URI  JWT_SECRET  ADMIN_EMAIL  ADMIN_PASSWORD (or ADMIN_PASSWORD_HASH)
+#      MONGO_URI  JWT_SECRET  APP_PUBLIC_URL  SMTP_HOST  SMTP_FROM
 #      SHOPIFY_PARTNER_ORG_ID  SHOPIFY_PARTNER_API_TOKEN  SHOPIFY_PARTNER_API_VERSION
+#  SMTP_FROM may be left unset when SMTP_USER is an email address (it falls back
+#  to it), SMTP_USER and SMTP_PASS are set together or not at all, and
+#  SHOPIFY_PARTNER_API_VERSION has a default. ADMIN_EMAIL / ADMIN_PASSWORD /
+#  ADMIN_PASSWORD_HASH are ignored (checked only so boot can warn they are still
+#  set): nobody signs in with an environment variable any more — the owner is
+#  created on the dashboard's first-run setup screen.
+#
+#  ── Account recovery ────────────────────────────────────────────────────────
+#  The image carries the compiled recovery CLI, which prints setup and reset
+#  links instead of emailing them (it never takes a password):
+#      docker compose exec backend npm run auth:admin:dist -- status
+#  It needs only MONGO_URI (and APP_PUBLIC_URL for the commands that print a
+#  link), so it still runs while the server itself refuses to boot:
+#      docker compose run --rm backend npm run auth:admin:dist -- status
 # =============================================================================
 
 # One place to pin the base image, shared by all three stages so they can never
@@ -111,8 +125,8 @@ FROM ${NODE_IMAGE} AS runtime
 # process would die from is simply DISCARDED unless the program installs its own
 # handler. src/core/shutdown.ts does install one — but it is registered inside
 # bootstrap().then(), so during the whole boot window (dotenv, config validation,
-# the Mongo connection, the admin seed, the partner-app registration) there is no
-# handler yet and a `docker stop` in that window is ignored until the 10s grace
+# the Mongo connection, the install-state and auth-index steps, the partner-app
+# registration) there is no handler yet and a `docker stop` in that window is ignored until the 10s grace
 # period expires and the daemon SIGKILLs.
 #
 # A SIGKILL skips the entire shutdown sequence: the cron is not stopped, in-flight
@@ -147,13 +161,14 @@ COPY --chown=node:node package.json package-lock.json ./
 
 # --omit=dev is what makes this image small and its attack surface honest:
 # typescript, ts-node, eslint and their transitive trees never enter it. The
-# nine runtime dependencies (@google-cloud/bigquery, axios, bcryptjs, dotenv,
-# express, helmet, jsonwebtoken, mongoose, stopcock) are all pure JavaScript, so
-# there is nothing to build here.
+# ten runtime dependencies (@google-cloud/bigquery, axios, bcryptjs, dotenv,
+# express, helmet, jsonwebtoken, mongoose, nodemailer, stopcock) are all pure
+# JavaScript, so there is nothing to build here.
 #
-# ⚠️ This is also why `npm run seed:demo` does NOT work in this image: ts-node is
-# a devDependency and src/ is never copied. Use `npm run seed:demo:dist`, which
-# runs the compiled dist/scripts/seedDemo.js.
+# ⚠️ This is also why `npm run seed:demo` and `npm run auth:admin` do NOT work in
+# this image: ts-node is a devDependency and src/ is never copied. Use the
+# `:dist` forms — `npm run seed:demo:dist`, `npm run auth:admin:dist` — which run
+# the compiled scripts under dist/scripts/.
 RUN npm ci --omit=dev --no-audit --no-fund
 
 # The compiled output, and ONLY the compiled output. No src/, no tsconfig, no

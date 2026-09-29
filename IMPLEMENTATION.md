@@ -9,7 +9,8 @@ and not a setup guide.
 | document | answers |
 |---|---|
 | [`README.md`](./README.md) | What the product is and why it exists |
-| [`DEPLOYMENT.md`](./DEPLOYMENT.md) | How to run it — Docker, credentials, first sync, upgrades |
+| [`DEPLOYMENT.md`](./DEPLOYMENT.md) | How to run it — Docker, credentials, first-run setup, roles, recovery, first sync, upgrades |
+| [`SECURITY.md`](./SECURITY.md) | The trust model, and how to report a vulnerability |
 | [`backend/README.md`](./backend/README.md) | How to run the backend on its own |
 | [`backend/docs/FIDELITY.md`](./backend/docs/FIDELITY.md) | What each published figure means and how it can be wrong |
 | **this file** | How it is put together |
@@ -61,7 +62,7 @@ Three processes. Two of them are yours; the third is a database.
                                 │  └───────────┬───────────────┘  │
                                 │              ▼                  │
                                 │        ┌──────────┐             │
-                                │        │ MongoDB  │  9 colls    │
+                                │        │ MongoDB  │  16 colls   │
                                 │        └────┬─────┘             │
                                 │             ▼                   │
                                 │  ┌────────────────────────────┐ │
@@ -72,7 +73,7 @@ Three processes. Two of them are yours; the third is a database.
                                                  │ JSON
                                                  ▼
                                 ┌────────────────────────────────┐
-                                │ FRONTEND (Next.js 14, Polaris) │
+                                │ FRONTEND (Next.js 15, Polaris) │
                                 │  proxies /api on its own origin│
                                 └────────────────────────────────┘
 ```
@@ -82,15 +83,19 @@ the API process and claims work with an atomic MongoDB update (§3.7). That is a
 self-hoster stands up two containers and a database, and nothing else, before the first number
 appears.
 
+**One more outbound connection is required: an SMTP server.** Accounts are created by first-run setup
+and emailed invitation, and recovered by emailed link, so the backend refuses to boot without one
+(§3.5). It is the only thing besides Shopify and the optional BigQuery tier that the backend talks to.
+
 **Size, for orientation** (measured, and it moves — the commands are here so you can re-take it):
 
 | | count | command |
 |---|---|---|
-| TypeScript files in `backend/src` | **247** | `find backend/src -name '*.ts' -type f \| wc -l` |
-| lines of TypeScript | **~60k** | `find backend/src -name '*.ts' -exec cat {} + \| wc -l` |
-| test suite files | **23** | `ls backend/test/*.test.js \| wc -l` |
-| JavaScript files in `frontend` | **73** (~19k lines) | `find frontend -name '*.js' -not -path '*/node_modules/*' -not -path '*/.next/*' \| wc -l` |
-| HTTP routes | **38** | `grep -rE "^\s*router\.(get\|post\|put\|patch\|delete)\(" backend/src/routes/*.ts \| wc -l` |
+| TypeScript files in `backend/src` | **313** | `find backend/src -name '*.ts' -type f \| wc -l` |
+| lines of TypeScript | **~79k** | `find backend/src -name '*.ts' -exec cat {} + \| wc -l` |
+| test suite files | **39** | `ls backend/test/*.test.js \| wc -l` |
+| JavaScript files in `frontend` | **105** (~29k lines) | `find frontend -name '*.js' -not -path '*/node_modules/*' -not -path '*/.next/*' \| wc -l` |
+| HTTP routes | **66** | `grep -rE "^\s*router\.(get\|post\|put\|patch\|delete)\(" backend/src/routes/*.ts \| wc -l` |
 
 Much of that TypeScript volume is comment. This codebase argues with itself in the files rather than
 in a wiki, deliberately: the reasoning that stops a figure being wrong has to be where the figure is
@@ -102,39 +107,48 @@ computed, or the next person deletes the guard as dead weight.
 
 ```
 .
-├── README.md  DEPLOYMENT.md  IMPLEMENTATION.md  LICENSE
+├── README.md  DEPLOYMENT.md  SETUP.md  IMPLEMENTATION.md  SECURITY.md  LICENSE
 ├── .env.example              one file drives both containers
 ├── docker-compose.yml        mongo + backend + frontend
 │
 ├── backend/
 │   ├── Dockerfile  eslint.config.js  tsconfig.json
 │   ├── docs/FIDELITY.md
-│   ├── test/                 23 suites + 2 harnesses (plain node:test)
+│   ├── test/                 39 suites + 2 harnesses (plain node:test)
 │   └── src/
 │       ├── apps/app.ts       the ONLY entry point
-│       ├── scripts/          seedDemo.ts / teardownDemo.ts — the demo dataset
+│       ├── scripts/          seedDemo.ts / teardownDemo.ts — the demo dataset;
+│       │                     authAdmin.ts — the account-recovery CLI
 │       ├── core/             bootstrap, db, logger, shutdown
 │       ├── config/           index.ts (the only reader of process.env) + validate.ts
-│       ├── constants/        cross-module vocabularies
-│       ├── models/           9 mongoose schemas + the registry
-│       ├── middlewares/      verifyAdmin, loginRateLimit, securityHeaders
-│       ├── routes/           index.ts = the security seam, + 10 domain route files
-│       ├── controllers/      11 thin request handlers
+│       ├── constants/        cross-module vocabularies (authVocab, partnerVocab, syncJob)
+│       ├── models/           16 mongoose schemas + the registry
+│       ├── middlewares/      authenticate, requirePermission, loginRateLimit,
+│       │                     authFlowRateLimit, securityHeaders, terminalErrorHandler
+│       ├── routes/           index.ts = the security seam, + 15 domain route files
+│       ├── controllers/      16 thin request handlers
 │       ├── types/            express augmentation, service envelope types
-│       ├── utils/            apiResponse, promiseHelper
-│       └── modules/          the application itself — 8 of them, see §3.3
-│           ├── auth/  partner/  revenue/  bigquery/  sync/
-│           └── store/  conversion/  shared/
+│       ├── utils/            apiResponse, promiseHelper, clientAddress
+│       └── modules/          the application itself — 9 of them, see §3.3
+│           ├── auth/  mail/  partner/  revenue/  bigquery/
+│           └── sync/  store/  conversion/  shared/
 │
 └── frontend/
     ├── Dockerfile  docker-entrypoint.sh  next.config.js
-    ├── pages/**                10 top-level routes (Overview + 7 Performance + apps + sync)
+    ├── pages/**                10 dashboard routes (Overview + 7 Performance + apps + sync),
+    │                           settings/users, account, and the public login, setup,
+    │                           setup/verify, accept-invite, forgot-password, reset-password
     ├── components/growth-intel/   ⚠️ a DIRECTORY, not a URL — see §4.4b
-    │   ├── dataState.js          the five-state decoder — see §4.4a
+    │   ├── dataState.js          the six-state decoder — see §4.4a
     │   └── DataStateSection.js    its render half
-    ├── API_Services/           apiClient + authService + 9 growth-intel services + notImplemented.js
-    ├── utils/                  auth.js, and dashboardRoutes.js — the ten routes + the Revenue tabs
-    └── contexts/               growthIntelContext (selected app), loaderContext
+    ├── components/auth/        the public pages' shared pieces (fragment-token hook, password fields)
+    ├── components/admin/       the Users & roles tabs
+    ├── API_Services/           apiClient + authService + accountService + userAdminService
+    │                           + 9 growth-intel services + notImplemented.js
+    ├── utils/                  auth.js, publicRoutes.js, permissions.js, and dashboardRoutes.js —
+    │                           the ten routes, the admin routes, the Revenue and Users tabs
+    └── contexts/               sessionContext (who is signed in, their permissions),
+                                growthIntelContext (selected app), loaderContext
 ```
 
 ---
@@ -166,8 +180,21 @@ in the codebase ordinary top-level imports are correct, and required.
 2. **listen first** — so `/healthz` can answer *503 while warming* rather than refusing the
    connection, which during a rolling deploy reads as a crash;
 3. register graceful shutdown immediately, so a signal during the slow steps still winds down;
-4. seed the operator account — **non-fatal**, because `/healthz` reporting the reason beats an exit
-   that destroys the signal;
+4. the account steps (§3.5), in this order:
+   - `ensureInstallState()` — **fatal**: the install document is the only record of whether setup
+     is open, and a database that already holds users gets it LOCKED, never open;
+   - `markLegacyOperators()` — non-fatal, bounded at 30 s: stamps `legacy_at` on accounts left by
+     the single-operator build, which sign-in never reads;
+   - `ensureAuthIndexes()` — **fatal**: builds the auth collections' indexes explicitly, even with
+     `MONGO_DISABLE_AUTO_INDEX=true`, because the unique indexes *are* the gates (one account per
+     address, one outstanding invitation per address, one use per link). Account-creating requests
+     answer `503` until it has succeeded in this process;
+   - `reconcileSetup()` — non-fatal, bounded: rolls a setup that crashed between locking the install
+     and inserting the owner forward from the claim it left;
+   - `logSetupState()` — non-fatal, bounded: says who may claim setup, WARNs while it is open to
+     anyone, and logs the CLI command when the owner is missing;
+   - `verifyMailAtBoot()` — non-fatal and **not awaited**: a slow mail server must not hold up the
+     sync machinery. It bounds itself at 20 s and logs its own outcome;
 5. register the partner app from config — **non-fatal**, so a fresh clone that has not set
    `SHOPIFY_PARTNER_APP_ID` still boots and can be fixed over the API without a restart;
 6. register the `PARTNER_SYNC` job handler, then `assertHandlersRegistered()` — **fatal by design**:
@@ -177,14 +204,20 @@ in the codebase ordinary top-level imports are correct, and required.
 7. start the job runner and the crons. A malformed cron expression **throws**, rather than firing at
    a time nobody chose.
 
+Because the server listens before step 4, a request can arrive while the account steps run; the
+`503 INDEXES_NOT_READY` answer is what keeps an account from being created before its unique gate
+exists.
+
 One `.then`, one fatal `.catch`, `process.exit(1)` so the supervisor restarts rather than leaving a
 half-booted process answering with data nothing is refreshing.
 
 ### 3.2 Configuration
 
 `src/config/index.ts` is **the only file in the repository that reads `process.env`.** Everything
-else consumes `config.<SECTION>.<FIELD>`. Sections: `APP`, `MONGO`, `AUTH`, `PARTNER`, `REVENUE`,
-`SYNC`, `BIGQUERY`, `LOG`.
+else consumes `config.<SECTION>.<FIELD>`. Sections: `APP`, `MONGO`, `AUTH`, `MAIL`, `PARTNER`,
+`REVENUE`, `SYNC`, `BIGQUERY`, `LOG` — each frozen on its own line. 70 environment names are read;
+three of them (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_PASSWORD_HASH`) only to set
+`AUTH.LEGACY_ADMIN_ENV_PRESENT`, so boot can warn that they are ignored.
 
 Two small readers do all the coercion — `_str` (trims, because `.env` files are hand-edited) and
 `_int` (falls back on unset, blank, `NaN` and `Infinity` alike). Derived flags are computed from
@@ -195,11 +228,20 @@ BIGQUERY.ENABLED = Boolean(projectId && dataset && (serviceAccountJson || adcPat
 ```
 
 `config/validate.ts` runs at boot and **refuses to start on a missing TIER-1 value, naming it** and
-printing an example line. Tier 1 is **seven entries** in `TIER_1_KEYS`: `MONGO_URI`, `JWT_SECRET`
-(≥32 chars), `ADMIN_EMAIL`, `ADMIN_PASSWORD` *or* `ADMIN_PASSWORD_HASH` (one entry — the label is
-resolved to whichever the operator set), `SHOPIFY_PARTNER_ORG_ID`, `SHOPIFY_PARTNER_API_TOKEN` and
-`SHOPIFY_PARTNER_API_VERSION`. The validator also rejects a bcrypt hash placed in the plaintext
-variable and vice versa — a mistake that otherwise produces a password that matches nothing.
+printing an example line. Tier 1 is **eight entries** in `TIER_1_KEYS`, in setup order: `MONGO_URI`,
+`JWT_SECRET` (≥32 chars), `APP_PUBLIC_URL` (absolute http(s), no path, query, fragment or
+credentials), `SMTP_HOST` (a bare host name), `SMTP_FROM` (the resolved value — it falls back to
+`SMTP_USER` when that is an address — must be one bare address), `SHOPIFY_PARTNER_ORG_ID`,
+`SHOPIFY_PARTNER_API_TOKEN` and `SHOPIFY_PARTNER_API_VERSION`. Three more refusals are explicit
+checks after that loop: `SMTP_USER` / `SMTP_PASS` set one without the other, an `SMTP_PORT` outside
+1–65535, and a `SETUP_OWNER_EMAIL` that is not a bare address. When the legacy `ADMIN_*` variables
+are present and any of `APP_PUBLIC_URL` / `SMTP_HOST` / `SMTP_FROM` has a problem, the error is headed
+`UPGRADING FROM A SINGLE-OPERATOR BUILD` and names the `DEPLOYMENT.md` section to read.
+
+The value checkers (`checkPublicUrl`, `isLoopbackPublicUrl`, `isBareEmailAddress`) are exported, so the
+recovery CLI and the auth and mail modules apply the rule boot refuses on rather than a second
+spelling of it. `collectConfigProblems(cfg)` returns problems and warnings without touching the
+process, so the rules are testable.
 
 Settings that change what the numbers *say* — `ACTIVE_SUB_WINDOW_DAYS`, `REVENUE_REPORTING_CURRENCY`,
 the sync windows — are documented in `FIDELITY.md` §7 rather than only here, because changing one is
@@ -245,7 +287,7 @@ checkable because the import has exactly one legal location.
 > by `exportSurface.test.js` (§5).
 
 **Barrels.** Every module with a barrel ends in `export = { … }` with **every key enumerated**.
-Seven of the eight have one; `modules/shared` deliberately does not, and is reached only by deep
+Eight of the nine have one; `modules/shared` deliberately does not, and is reached only by deep
 path — there is no `require('../../shared')` anywhere. Never a spread — a
 spread type-checks perfectly and destroys the one property that makes a surface reviewable, that you
 can read the barrel and know what it publishes. And `export =`, never `export default`, because
@@ -254,12 +296,13 @@ which is why every internal import is `import x = require('./x')`.
 
 Barrels are for consumers **outside** the module; siblings import by deep path.
 
-**The eight modules, and the direction of dependency between them:**
+**The nine modules, and the direction of dependency between them:**
 
 | module | owns |
 |---|---|
 | `shared` | the model chokepoint, the confidence envelope, cross-module vocabularies and pure helpers |
-| `auth` | the single operator: seed, login, verify |
+| `auth` | accounts and access: first-run setup and the install lock, sign-in and sessions, the one principal derivation, the permission catalogue and roles, invitations, password reset and change, the security activity log, the recovery CLI's operations (§3.5) |
+| `mail` | outgoing email: one SMTP transport, four fixed templates, the send caps, the boot check. Imports config, the logger and utils — **never `auth`**; auth calls mail, and mail knows nothing about users |
 | `partner` | the Shopify Partner API client, the sync that fills the spine and the ledger, coverage |
 | `bigquery` | the optional listing-analytics tier: the client, the two sync jobs, the read side |
 | `revenue` | **the MRR ledger** — `liveSetAsOf` and every reduction of it |
@@ -268,7 +311,9 @@ Barrels are for consumers **outside** the module; siblings import by deep path.
 | `sync` | the job row, the runner, the crons, the health snapshot |
 
 `store` and `conversion` sit downstream of `revenue` and `bigquery` and reach them through their
-barrels. The reverse direction exists too — and **that** is where the barrel rule has teeth. See
+barrels. `sync` imports **nothing** from `auth`: the health snapshot's owner check reads the models
+chokepoint directly, and the one shared value (`INSTALL_STATE_ID`) lives in the dependency-free
+`src/constants/authVocab.constants.ts`, which the auth models and `auth.constants` also read. The reverse direction exists too — and **that** is where the barrel rule has teeth. See
 §3.13 before adding any cross-module import.
 
 ### 3.4 The HTTP layer, and the security seam
@@ -279,11 +324,16 @@ default for a newly added router is **guarded**:
 ```ts
 // 1. PUBLIC — two mounts, and both are argued for in the file
 router.get('/healthz', _healthLiveness);
-router.use('/api/auth', authRoutes);
+router.use('/api/auth', authRoutes);          // sign-in, setup, invitation acceptance, password reset
 
 // 2. GUARDED — the guard is the router's FIRST layer
 const guardedApiRouter = Router();
-guardedApiRouter.use(verifyAdmin);
+guardedApiRouter.use(authenticate);
+guardedApiRouter.use('/account',       accountRoutes);
+guardedApiRouter.use('/users',         userRoutes);
+guardedApiRouter.use('/invites',       inviteRoutes);
+guardedApiRouter.use('/roles',         roleRoutes);
+guardedApiRouter.use('/audit-events',  auditRoutes);
 guardedApiRouter.use('/partner-apps',  partnerAppRoutes);
 guardedApiRouter.use('/sync',          syncRoutes);
 guardedApiRouter.use('/revenue',       revenueRoutes);
@@ -301,7 +351,7 @@ the roster and the frontend already documents that path, but it is its own area 
 controller, service and vocabulary — so it gets its own file rather than a third line in
 `store.routes.ts`. Express falls through a router that handles nothing, so `storeRoutes` declines
 `/countries` and `countryRoutes` picks it up. Both are mounted on `guardedApiRouter`, so both are
-behind `verifyAdmin`.
+behind `authenticate`.
 
 Express runs a router's own middleware before dispatching to anything mounted on it, so a sub-router
 added to `guardedApiRouter` is behind the guard **the moment it is added** — no second step, nothing
@@ -317,57 +367,98 @@ Nothing throws, nothing logs, and it looks exactly like a working install.
 through to the guarded mount and answers **401 rather than 404** — the correct direction to be wrong
 in.
 
-**The endpoint table as built — 38 routes, 2 public and 36 guarded.** Counted with:
+**Authentication once, authorisation per route.** `authenticate` answers "who is this"; "may they do
+*this*" is the one policy every guarded route declares as its **first route-level middleware**,
+beside its handler — `requirePermission(PERMISSIONS.MERCHANTS_READ)`, or `requireSelf()` for the
+`/api/account` routes any signed-in person may use. There is deliberately no router-level
+permission: one line far from the handler covering everything below it is the shape this file exists
+to avoid. An unknown key throws when the route file loads, so a typo stops the boot instead of
+opening or closing a route silently (§3.5).
+
+**The endpoint table as built — 66 routes, 10 public and 56 guarded.** Counted with:
 
 ```bash
-grep -rE "^\s*router\.(get|post|put|patch|delete)\(" backend/src/routes/*.ts | wc -l   # 38
+grep -rE "^\s*router\.(get|post|put|patch|delete)\(" backend/src/routes/*.ts | wc -l   # 66
 ```
 
-| method | path | handler | auth |
+The policy column is what the route declares; `@self` is `requireSelf()`. The login limiter is
+mounted in `apps/app.ts` behind the login path's own 8 KB parser (it reads the email and device
+token) and before the general 1 MB one; the other three limiters are route-level in
+`auth.routes.ts`, after it, because the token-flow one is keyed on the posted token.
+
+| method | path | handler | policy |
 |---|---|---|---|
 | `GET` | `/healthz` | `_healthLiveness` | **public** |
-| `POST` | `/api/auth/login` | `_authAdminLogin` | **public** |
-| `GET` | `/api/partner-apps` | `_partnerAppList` | guarded |
-| `POST` | `/api/partner-apps` | `_partnerAppUpsert` | guarded |
-| `GET` | `/api/partner-apps/:partner_app_id` | `_partnerAppGet` | guarded |
-| `PATCH` | `/api/partner-apps/:partner_app_id` | `_partnerAppUpdate` | guarded |
-| `DELETE` | `/api/partner-apps/:partner_app_id` | `_partnerAppDeactivate` | guarded |
-| `GET` | `/api/partner-apps/:partner_app_id/events` | `_partnerAppEvents` | guarded |
-| `GET` | `/api/partner-apps/:partner_app_id/kpi` | `_partnerAppKpi` | guarded |
-| `GET` | `/api/sync/health` | `_syncHealth` | guarded |
-| `GET` | `/api/sync/jobs` | `_syncListJobs` | guarded |
-| `GET` | `/api/sync/jobs/:job_id` | `_syncJobStatus` | guarded |
-| `POST` | `/api/sync/jobs/:job_id/cancel` | `_syncCancelJob` | guarded |
-| `POST` | `/api/sync/partner` | `_syncTriggerPartnerSync` | guarded |
-| `POST` | `/api/sync/bigquery` | `_syncTriggerBigQuerySync` | guarded |
-| `POST` | `/api/sync/install-attribution` | `_syncTriggerInstallAttributionSync` | guarded |
-| `POST` | `/api/sync/dummy` | `_syncTriggerDummySync` | guarded |
-| `GET` | `/api/revenue/now` | `_revenueNowSummary` | guarded |
-| `GET` | `/api/revenue/overview` | `_revenueWindowedOverview` | guarded |
-| `POST` | `/api/revenue/shop-plans` | `_revenueShopPlans` | guarded |
-| `GET` | `/api/funnel` | `_funnelOverview` | guarded |
-| `GET` | `/api/funnel/traffic-source` | `_funnelTrafficSource` | guarded |
-| `GET` | `/api/funnel/geo` | `_funnelGeo` | guarded |
-| `GET` | `/api/funnel/install-cohort` | `_funnelInstallCohort` | guarded |
-| `GET` | `/api/conversion/funnel` | `_conversionFunnel` | guarded |
-| `GET` | `/api/conversion/custom-funnel` | `_conversionCustomFunnel` | guarded |
-| `GET` | `/api/conversion/trial-outcomes` | `_conversionTrialOutcomes` | guarded |
-| `GET` | `/api/conversion/trial-trend` | `_conversionTrialTrend` | guarded |
-| `GET` | `/api/conversion/cohort-retention` | `_conversionCohortRetention` | guarded |
-| `GET` | `/api/conversion/time-to-paid` | `_conversionTimeToPaid` | guarded |
-| `GET` | `/api/conversion/plan-mix` | `_conversionPlanMix` | guarded |
-| `GET` | `/api/conversion/logo-churn` | `_conversionLogoChurn` | guarded |
-| `GET` | `/api/conversion/revenue-churn` | `_conversionRevenueChurn` | guarded |
-| `GET` | `/api/stores` | `_getStores` | guarded |
-| `GET` | `/api/stores/detail` | `_getStoreDetail` | guarded |
-| `GET` | `/api/stores/countries` | `_getCountries` | guarded |
-| `GET` | `/api/subscriptions` | `_getSubscriptions` | guarded |
-| `GET` | `/api/meta/coverage` | `_metaCoverage` | guarded |
+| `POST` | `/api/auth/login` | `_createAuthSession` | **public** · `loginRateLimit` (app-level) |
+| `GET` | `/api/auth/setup` | `_getAuthSetupStatus` | **public** |
+| `POST` | `/api/auth/setup` | `_requestAuthSetup` | **public** · `setupRequestRateLimit` |
+| `POST` | `/api/auth/setup/inspect` | `_inspectAuthSetupToken` | **public** · `tokenFlowRateLimit` |
+| `POST` | `/api/auth/setup/complete` | `_completeAuthSetup` | **public** · `tokenFlowRateLimit` |
+| `POST` | `/api/auth/invites/inspect` | `_inspectAuthInvite` | **public** · `tokenFlowRateLimit` |
+| `POST` | `/api/auth/invites/accept` | `_acceptAuthInvite` | **public** · `tokenFlowRateLimit` |
+| `POST` | `/api/auth/password/forgot` | `_requestAuthPasswordReset` | **public** · `passwordForgotRateLimit` |
+| `POST` | `/api/auth/password/reset` | `_resetAuthPassword` | **public** · `tokenFlowRateLimit` |
+| `GET` | `/api/account` | `_getAccountProfile` | @self |
+| `PATCH` | `/api/account` | `_updateAccountName` | @self |
+| `POST` | `/api/account/password` | `_changeAccountPassword` | @self |
+| `POST` | `/api/account/logout` | `_logoutAccountSession` | @self |
+| `POST` | `/api/account/sessions/revoke-others` | `_revokeAccountOtherSessions` | @self |
+| `GET` | `/api/users` | `_listUsers` | `users:read` |
+| `PATCH` | `/api/users/:user_id/role` | `_changeUserRole` | `users:manage` |
+| `POST` | `/api/users/:user_id/disable` | `_disableUser` | `users:manage` |
+| `POST` | `/api/users/:user_id/enable` | `_enableUser` | `users:manage` |
+| `POST` | `/api/users/:user_id/sessions/revoke` | `_revokeUserSessions` | `users:manage` |
+| `POST` | `/api/users/:user_id/password-reset` | `_sendUserPasswordReset` | `users:manage` |
+| `GET` | `/api/invites` | `_listInvites` | `users:read` |
+| `POST` | `/api/invites` | `_createInvite` | `users:manage` |
+| `POST` | `/api/invites/:invite_id/resend` | `_resendInvite` | `users:manage` |
+| `POST` | `/api/invites/:invite_id/revoke` | `_revokeInvite` | `users:manage` |
+| `GET` | `/api/roles` | `_listRoles` | `users:read` |
+| `POST` | `/api/roles` | `_createRole` | `roles:manage` |
+| `PATCH` | `/api/roles/:role_id` | `_updateRole` | `roles:manage` |
+| `DELETE` | `/api/roles/:role_id` | `_deleteRole` | `roles:manage` |
+| `GET` | `/api/audit-events` | `_listAuditEvents` | `audit:read` |
+| `GET` | `/api/partner-apps` | `_partnerAppList` | `apps:read` |
+| `POST` | `/api/partner-apps` | `_partnerAppUpsert` | `apps:manage` |
+| `GET` | `/api/partner-apps/:partner_app_id/kpi` | `_partnerAppKpi` | `financials:read` |
+| `GET` | `/api/partner-apps/:partner_app_id/events` | `_partnerAppEvents` | `merchants:read` |
+| `GET` | `/api/partner-apps/:partner_app_id` | `_partnerAppGet` | `apps:read` |
+| `PATCH` | `/api/partner-apps/:partner_app_id` | `_partnerAppUpdate` | `apps:manage` |
+| `DELETE` | `/api/partner-apps/:partner_app_id` | `_partnerAppDeactivate` | `apps:manage` |
+| `POST` | `/api/sync/partner` | `_syncTriggerPartnerSync` | `sync:run` |
+| `POST` | `/api/sync/bigquery` | `_syncTriggerBigQuerySync` | `sync:run_billed` |
+| `POST` | `/api/sync/install-attribution` | `_syncTriggerInstallAttributionSync` | `sync:run_billed` |
+| `POST` | `/api/sync/dummy` | `_syncTriggerDummySync` | `sync:run` |
+| `GET` | `/api/sync/jobs` | `_syncListJobs` | `sync:read` |
+| `GET` | `/api/sync/jobs/:job_id` | `_syncJobStatus` | `sync:read` |
+| `POST` | `/api/sync/jobs/:job_id/cancel` | `_syncCancelJob` | `sync:run` |
+| `GET` | `/api/sync/health` | `_syncHealth` | `sync:read` |
+| `GET` | `/api/revenue/now` | `_revenueNowSummary` | `merchants:read` |
+| `GET` | `/api/revenue/overview` | `_revenueWindowedOverview` | `merchants:read` |
+| `POST` | `/api/revenue/shop-plans` | `_revenueShopPlans` | `merchants:read` |
+| `GET` | `/api/funnel` | `_funnelOverview` | `analytics:read` |
+| `GET` | `/api/funnel/traffic-source` | `_funnelTrafficSource` | `analytics:read` |
+| `GET` | `/api/funnel/geo` | `_funnelGeo` | `analytics:read` |
+| `GET` | `/api/funnel/install-cohort` | `_funnelInstallCohort` | `merchants:read` |
+| `GET` | `/api/conversion/custom-funnel` | `_conversionCustomFunnel` | `analytics:read` |
+| `GET` | `/api/conversion/funnel` | `_conversionFunnel` | `analytics:read` |
+| `GET` | `/api/conversion/cohort-retention` | `_conversionCohortRetention` | `analytics:read` |
+| `GET` | `/api/conversion/time-to-paid` | `_conversionTimeToPaid` | `analytics:read` |
+| `GET` | `/api/conversion/plan-mix` | `_conversionPlanMix` | `financials:read` |
+| `GET` | `/api/conversion/trial-outcomes` | `_conversionTrialOutcomes` | `merchants:read` |
+| `GET` | `/api/conversion/trial-trend` | `_conversionTrialTrend` | `analytics:read` |
+| `GET` | `/api/conversion/logo-churn` | `_conversionLogoChurn` | `merchants:read` |
+| `GET` | `/api/conversion/revenue-churn` | `_conversionRevenueChurn` | `merchants:read` |
+| `GET` | `/api/stores` | `_getStores` | `merchants:read` |
+| `GET` | `/api/stores/detail` | `_getStoreDetail` | `merchants:read` |
+| `GET` | `/api/stores/countries` | `_getCountries` | `financials:read` |
+| `GET` | `/api/subscriptions` | `_getSubscriptions` | `merchants:read` |
+| `GET` | `/api/meta/coverage` | `_metaCoverage` | `apps:read` |
 
 ⚠️ `POST /api/revenue/shop-plans` is a **read** served over POST. It takes up to two hundred shop
 domains in one batch, and a query string that long is at the mercy of every proxy in between — the
-verb is about the size of the payload, not about a mutation. The route-guard test does not care
-about the verb, only about the guard.
+verb is about the size of the payload, not about a mutation, which is why it carries a `:read`
+permission. The route-guard test does not care about the verb, only about the guard.
 
 **Controller contract.** Handlers are named `_<verbDomainResource>` and exported by that name;
 `export = { … }`. They read the request bag through a single cast per handler
@@ -384,57 +475,223 @@ which is how a perfectly healthy unconfigured deployment starts looking broken.
 
 **Service contract.** Every service takes `(identityObj, params)` and **resolves** a
 `promiseReturnResult(status, data, error, msg)` envelope — it never rejects. `identityObj` is
-`{ user_id }`; non-human callers use named ids (`BOOT`, `SYNC_WORKER`) so the caller is legible in a
-log line.
+`{ user_id }`; non-human callers use named ids (`BOOT`, `SYNC_WORKER`, and the auth module's own
+sentinels for anonymous requests, the system and the CLI) so the caller is legible in a log line. The
+two exceptions are the fatal boot steps `ensureInstallState` and `ensureAuthIndexes`, which throw so
+that boot stops. An auth refusal carries `error.code`, and controllers map it to a status through
+**one** table, `AUTH_ERROR_HTTP_STATUS`, via `apiResponse.serviceFailureResponse`.
 
-### 3.5 Authentication
+### 3.5 Authentication, authorisation and mail
 
-Three operations and deliberately no more: seed the single operator at first boot, exchange a
-password for a token, verify a token. No sign-up, no reset, no invite, no second role — each of
-those is another unauthenticated endpoint, and this API has exactly two.
+Multi-user sign-in with roles, in `modules/auth`, plus the `modules/mail` it sends through. People get
+an account in **exactly two ways** — the first-run setup screen creates the owner, once, and an
+emailed invitation creates everyone else. There is no public sign-up, no email change and no user
+deletion (a leaver is disabled). Everything below was read out of the code; the operator's view of the
+same thing is `DEPLOYMENT.md`, sections "Users, roles and permissions" and "Account recovery (CLI)".
 
-Two middlewares sit in front of all of it, mounted in `apps/app.ts`:
+**The install document is the setup lock.** `gi_system_states` holds one document, `_id: 'install'`,
+with `setup_completed_at`, `owner_user_id` and `setup_token_id`. Setup is complete when
+`setup_completed_at` is set — a persisted flag, **never** re-derived from a user count — and nothing
+in the code ever unsets it. Ownership is the `owner_user_id` pointer and nothing else: there is no
+owner flag on a user row (the owner's stored `role_key` is `admin`, which only matters if ownership
+moves). Boot creates the document FATALLY (`ensureInstallState`), OPEN only when `gi_users` is empty;
+a database that already holds users but no install document gets it LOCKED with no owner, and an
+`ERROR` naming `transfer-owner`.
 
-- **`middlewares/securityHeaders.ts`** — one helmet instance, the **first** layer, so a reply that
-  never reaches a route still carries the headers.
-- **`middlewares/loginRateLimit.ts`** — mounted on `POST /api/auth/login` only, and *before* the body
-  parser, so a refused caller does not get a megabyte of JSON parsed on their behalf. It is the
-  enforcement behind `AUTH_LOGIN_RATE_LIMIT_MAX` / `..._WINDOW_MINUTES`, which described a throttle
-  from the first commit and were read by nothing until it landed.
+**Who may claim setup** is one rule, computed per call in `installState.service#resolveSetupRule` and
+used by the setup request, setup completion, `GET /api/auth/setup` and the recovery CLI alike:
+`SETUP_OWNER_EMAIL` if set; else the emails of every `gi_admin_users` row, if there are any (an
+upgrade from the single-operator build); else **open**, which boot logs as a WARN. A datastore error
+while reading it fails closed.
 
-**The limiter's design constraint is not brute force — it is not bricking the operator.** One
-account, no password reset, no second user, no support desk: a lockout here ends that install. So it
-is a rolling **window** and never a lockout (waiting always works); refusals are not charged, so
-hammering cannot extend a block; a success clears the tally and is never charged; it is keyed on the
-**address, never the account**, so nobody can lock the operator out by attacking their credential;
-nothing is persisted, so a restart clears every block; and **it fails open** — a throw inside it
-admits the request and logs, because `verifyAdmin` is the authentication boundary and a bug in a
-throttle must never become a denial of the only way in.
+**Setup, in two steps.**
 
-⚠️ It counts against `req.ip`, whose meaning is decided entirely by `app.set('trust proxy', …)` from
-`config.APP.TRUST_PROXY`. Default `false` is the conservative direction — an over-trusting default
-would publish an enforcement that one forged header disables, silently — but it means a deployment
-behind the dashboard proxy shares one bucket across all callers until `TRUST_PROXY` is set.
+- `POST /api/auth/setup` answers the same `202` whether or not the address may claim setup. The
+  response path does only email-independent work — shape, the lock, the global cap of 10 live setup
+  links (`429 SETUP_CAPACITY`, nothing evicted) — and then **one deferred job** (`setImmediate`) does
+  everything that depends on the address: the rule, the per-address throttles (≤3 live links, one a
+  minute, three an hour), the token insert, the audit row and the send. Neither the answer nor its
+  timing says whether the address is permitted; the log does.
+- `POST /api/auth/setup/complete` is ordered so a crash anywhere leaves a recoverable state, with no
+  transactions (Mongo standalone): shape → indexes ready (else `503`) → the install read → the live
+  token (`400`, with the specific A14 code) → the address still permitted → the password policy
+  (nothing consumed yet) → **claim** the token by compare-and-set, recording `{ name, password_hash }`
+  on it → **lock** the install by compare-and-set to a pre-generated owner id → insert the owner row
+  with that id → unset the claim and revoke every other live setup link → `201`. It never signs
+  anyone in. A crash between the lock and the insert is rolled forward at the next boot from the
+  claim (`reconcileSetup`); if the claim is gone too, boot logs the CLI command that repairs it.
 
-- `modules/auth/services/adminAuth.service.ts` is the **only** caller of bcrypt and the only writer
-  of `password_hash`. The schema carries no hashing hook on purpose: under Mongoose 9 a `pre('save')`
-  hook receives its arguments directly and has no `next`, and a callback-style async hook lets the
-  save proceed before the callback runs — which is how a users collection ends up storing plaintext.
-  Hashing is an explicit statement at the two places it happens.
+**Sessions.** Sign-in (`session.service#login`) compares the password with bcrypt — against a dummy
+hash when the address has no account, so an unknown address, a wrong password and a disabled account
+cost the same time and get the same `401` — then writes a `gi_auth_sessions` row and signs an HS256
+JWT carrying **ids only**: `sub` (user), `sid` (session), `aud: 'shopify-app-analytics'` and `exp`
+from `AUTH_TOKEN_TTL_HOURS`. It is signed with HMAC-SHA256(`JWT_SECRET`, a fixed label), never with
+`JWT_SECRET` itself: the single-operator build verified any HS256 token under the raw secret and read
+nothing else, so a rollback would otherwise have accepted every token this build issued — a Viewer's,
+a disabled account's — as its one full operator. Verification pins the algorithm and the audience; a
+token without `sid`/`aud` — every token the single-operator build issued — is refused. A successful
+sign-in re-hashes a password stored at a bcrypt cost other than `AUTH_BCRYPT_ROUNDS`.
+
+**Every request re-reads who the caller is.** `middlewares/authenticate.ts` (the guard, first layer
+of `guardedApiRouter`, §3.4) takes the bearer header only — missing ⇒ `401` before any database
+access — verifies the JWT, then `principal.service#loadPrincipal` reads session → user → install
+document → custom role. Any auth reason ⇒ `401`; a datastore failure ⇒ **`503`, never `401`**, so a
+database hiccup does not sign anyone out. So a sign-out, a disable, a password reset or a role change
+takes effect on the **next request**, not at token expiry. The session **epoch** closes the one race
+in that: `gi_users.session_epoch` is copied onto a session at sign-in from the same user read the
+bcrypt comparison used, and every "end all sessions" write (reset, disable, enable, sign-out
+everywhere, the CLI) bumps it in the same update that changes the hash or status. A session whose
+epoch no longer matches is `SESSION_STALE` ⇒ `401`. Change-password and "sign out my other sessions"
+bump it too, and hand the caller a **fresh** token carrying the new epoch.
+
+**One derivation of what a person may do.** `helpers/principal.helper.ts#resolvePrincipal` is pure
+and is the only place role → permissions is computed: the owner pointer ⇒ every catalogue key; a
+built-in role ⇒ its set from `roles.constants`; a custom role ⇒ its stored keys ∩ the catalogue, minus
+owner-only keys, minus any key whose prerequisites are missing; a missing custom role ⇒ **no
+permissions** (fail narrow, WARN). Permissions are never put in the token. `req.auth` is the frozen
+result plus the session id.
+
+**Authorisation is per route.** Each guarded route declares exactly one policy as its first
+route-level middleware: `requirePermission(PERMISSIONS.X)` or `requireSelf()` (any signed-in person —
+the `/api/account` routes). `requirePermission` throws **when the route file loads** if the key is not
+in the catalogue, answers `401` with no `req.auth` (fail closed) and `403` with
+`error: { code: 'FORBIDDEN', permission }` when the key is not held. The returned function is tagged in
+a module-private `WeakMap` so a test can read which policy a route carries (`readPolicyTag`).
+There is deliberately no router-level permission. Admin services re-load their **actor** from the
+database by `identity.user_id` and re-check the permission themselves, rather than trusting anything a
+controller hands in.
+
+**The catalogue and the roles are code.** `constants/permissions.constants.ts` holds the twelve keys
+in role-editor order, each with a label, a group, a description of what it discloses, and its direct
+prerequisites; `roles.constants.ts` holds Owner (all), Admin (all but `roles:manage`), Analyst and
+Viewer, nested Viewer ⊂ Analyst ⊂ Admin ⊂ Owner. Custom roles are rows in `gi_roles`, validated by one
+pure helper (`role.helper`): ⊆ catalogue, `apps:read` present, prerequisites closed, no owner-only
+key, name not a built-in's. The key strings are a cross-repository contract with
+`frontend/utils/permissions.js`.
+
+**One management rule.** `helpers/management.helper.ts#evaluateManagement` is the only definition of
+"may this actor act on that person / invitation / role": never on yourself through the admin
+endpoints, never on the owner through the API, the owner on anyone else, anyone else only with
+`users:manage` and only where the target's permissions — and any role being granted — are a **strict**
+subset of the actor's. It gates invite create/resend/revoke, role change, disable, enable, sign-out
+everywhere and the admin-sent reset, and it computes `can_manage` / `manage_block_reason` on each
+user row and which roles the UI offers. Writes re-assert the target's role in their compare-and-set
+filter, so a decision taken against "Viewer" cannot land on someone promoted in between (`409
+TARGET_CHANGED`).
+
+**Invitations** (`invite.service`). One outstanding invitation per address is a database guarantee —
+`pending_email` is set on create, unset on accept or revoke, and carries a unique **partial** index —
+so a duplicate is `409 INVITE_PENDING` without a read-then-write race. Resend is one compare-and-set
+that checks its own throttle (≥60 s since the last send, ≤5 sends in 24 h), rotates the token, resets
+the expiry and makes the resender the inviter. Accept is one compare-and-set on (id, token hash,
+live); a revoke racing an accept has exactly one winner, and an accept that loses deletes the user it
+inserted. **An invitation is only as good as its inviter**: at inspect and accept time the inviter must
+still be active and still allowed to grant the role, else the invite is revoked
+(`INVITER_NO_LONGER_PERMITTED`). Role changes, role edits and ownership moves re-run that same check
+over outstanding invitations (`reevaluateOutstandingInvites`, one spelling for all three), and
+disabling someone revokes the invitations they sent.
+
+**Passwords.** `helpers/password.helper.ts` is the policy: NFC-normalised, at least 15 code points,
+at most 72 UTF-8 bytes (bcrypt would silently ignore the rest, so it is refused, never truncated), not
+one repeated character, not on the 329-entry common-password list, not containing the email's local
+part (when that is four or more characters), not equal to the name. No composition rules.
+`services/passwordHash.service.ts` is the **only** bcrypt caller and the only source of a
+`password_hash`. The schema carries no hashing hook, on purpose: under Mongoose 9 a `pre('save')` hook
+receives its arguments directly and has no `next`, and a callback-style async hook lets the save
+proceed before the callback runs — which is how a users collection ends up storing plaintext. Forgot
+password answers the same `202` either way and defers everything email-dependent, like the setup
+request; its per-account throttle is a compare-and-set on the user row. A reset link is refused once
+the password has changed after it was issued. Wrong current password on change-password is `400`,
+not `401` — a `401` would sign the dashboard out.
+
+**Emailed links.** `services/authToken.service.ts` is the only `crypto.randomBytes` call for a link
+token (32 bytes → 43 base64url characters) and the only place a link string is formed:
+`${APP_PUBLIC_URL}${path}#token=…`, for exactly three paths (`/setup/verify`, `/accept-invite`,
+`/reset-password`). Only the sha256 is stored (`select: false`, compared again in code after the
+query); use is a compare-and-set, so a link works once; every lookup also requires
+`expires_at > now` (the TTL index is cleanup only). The token rides in the **fragment**, so it reaches
+no server log and no `Referer`, and the pages post it only on a button press. When a live-link lookup
+fails, one more lookup by hash picks the specific answer — `TOKEN_EXPIRED`, `TOKEN_USED`,
+`INVITE_REVOKED` or `TOKEN_INVALID` — which leaks nothing, since only the holder of a 256-bit token
+can ask. Links are never built from the request: `eslint.config.js` refuses `req.hostname`, `req.host`,
+`req.protocol`, `req.get()`, `req.header()`, `req.headers.host` and `x-forwarded-*` reads in `src/`.
+
+**Mail** (`modules/mail`, which imports config, the logger and utils, and never `modules/auth`). One
+lazily-created nodemailer transport: implicit TLS or required STARTTLS, certificate verified, TLS 1.2
+minimum, 10/10/30 s timeouts — `SMTP_ALLOW_INSECURE=true` is the only way off that. Four templates
+(setup confirmation, invitation, password reset, password changed) with **fixed subjects**, every
+interpolated value HTML-escaped and stripped of control and bidi characters, a text part always, no
+remote images, the expiry as a duration plus an ISO time in UTC, and the requesting IP only while
+`TRUST_PROXY` is set. `sendTemplatedEmail` never throws and resolves one of `SENT` (accepted by the
+server — never "delivered"), `FAILED`, `CAP_REACHED`, `UNCONFIRMED` (an admin-facing send passed its
+15-second deadline; the message may still arrive) or `NOT_CONFIGURED`. The caps are in process memory:
+`EMAIL_MAX_PER_HOUR`/`_PER_DAY`, of which anonymously-triggered mail may use half, and ≤10 per
+recipient per 24 h, of which anonymously-triggered mail may again use half — so strangers requesting
+resets for a member's address can never crowd out that member's password-changed notice or an
+admin-sent reset. Boot checks the server once, off the critical path (`verifyMailAtBoot`).
+`getMailStatus()` (every contact, sends included) feeds the Users page and the CLI; the setup
+screen, which anyone can read, gets `getPublicMailCheck()` — the connect-and-login check only,
+refreshed by `recheckTransport()` (coalesced, one per 30 s) on every setup request whatever the
+address. A send happens only for a permitted setup address, so a status that sends could move would
+name that address.
+
+**Four rate limiters, one implementation.** `middlewares/loginRateLimit.ts#createRateLimiter` is the
+factory; `loginRateLimit` (app-level, behind the login path's own 8 KB parser and before the general
+one, charged only on `401`) and the three in
+`authFlowRateLimit.ts` (route-level in `auth.routes.ts`) are instances. The token-flow one is keyed
+on sha256 of the posted token and charged only for a dead link; forgot-password and the setup request
+are keyed on `req.ip` and charged for everything except a shape `400`. Every one keeps the properties
+the login limiter was designed around, because a lockout that one caller can impose on everybody is
+worse than no limiter: a rolling **window**, never a lockout; refusals not charged; a deployment-wide
+budget of 5× the per-key limit, with a key cap of 10,000 past which new keys charge that budget; a
+30-second trickle once any budget is spent; nothing persisted, so a restart clears every block; and
+**fail open** — a throw inside admits the request and logs. Two rules hold for all four: a success is
+never charged and wipes nothing (when sign-in success cleared the tally, any member could reset the
+count between guesses at the owner's password), and a caller who hangs up after the whole request
+arrived is judged by the answer the handler still produces, never refunded for the hang-up (the
+handler runs bcrypt either way). Sign-in adds a **device budget**: a successful sign-in returns a
+`device_token` (HMAC under a key derived from `JWT_SECRET`, bound to the email, 90 days), and a later
+attempt for that email carrying it is metered on the device's own budget instead of the shared ones —
+the trickle alone admits whoever polls first, so it is the device budget that keeps a returning user
+in during a flood. ⚠️ The address-keyed ones are only as per-address as `TRUST_PROXY` makes `req.ip`
+(§7).
+
+**The security activity log.** `gi_audit_events`, written by `audit.service#recordAuditEvent`, which is
+best-effort (it never fails the action it describes) and refuses to store a token, password, hash,
+secret or link under any key. Thirty actions, from `SETUP_REQUESTED` to `CLI_USER_ENABLED`; every
+role reference carries a label snapshot. Rows from anonymous requests expire after 180 days; the rest
+are kept. Read through `GET /api/audit-events` (`audit:read`), newest first, cursor-paged.
+
+**The recovery CLI** (`src/scripts/authAdmin.ts`, `npm run auth:admin[:dist] -- <command>`) is the
+path when the dashboard cannot help: `status`, `setup-link`, `reset-link` (15 minutes),
+`revoke-sessions`, `enable`, `transfer-owner`, `repair-owner` (which revokes the missing owner's
+sessions and withdraws their invitations before reusing the id). Shell access is the trust boundary, so
+it prints links instead of mailing them and skips the per-address throttles; it never accepts a
+password argument, never reopens setup, and audits as actor type `CLI`. It checks only `MONGO_URI`
+(plus `APP_PUBLIC_URL` for link commands), not the full TIER-1 set, so it runs while a missing mail
+setting keeps the server down. Exit codes: 0 done, 1 refused or failed, 2 bad command line.
+
+**Status codes are a contract.** `400` bad input, a bad or expired link, or a password-policy refusal;
+`401` only for authentication (the guard, or bad sign-in credentials) — a public token endpoint never
+answers `401`, because the dashboard signs out on one; `403` permission denied or the management rule
+refused; `404` an unknown id (ids are checked against `/^[0-9a-f]{24}$/` first, never a `CastError`
+500); `409` a conflict; `429` a limiter or throttle; `503` the datastore could not be consulted, or
+the auth indexes are not built yet. Services put a code in `error.code`; every controller maps it
+through one table, `AUTH_ERROR_HTTP_STATUS`, via `apiResponse.serviceFailureResponse`.
+
+Kept from the single-operator build, and still load-bearing:
+
 - **Tokens expire.** `expiresIn` is always set from `AUTH.TOKEN_TTL_HOURS` (default 12). The system
-  this was extracted from signed without one, and a token with no expiry stays valid
-  forever and the only revocation lever is rotating the secret for everybody.
-- **Failures are 401s**, with a JSON body. An API that answers every authentication failure with
-  HTTP 200 and `{status:false}` — usually because call sites came to depend on the 200 before anyone
-  noticed — can no longer use 401 for what it means: it has to mean authentication *succeeded* and a
-  permission check rejected it.
-- `ADMIN_PASSWORD_HASH` beats `ADMIN_PASSWORD`; the plaintext path exists because "put your password
-  in `.env`" is what a self-hoster will do anyway, and it is hashed at first boot.
+  this was extracted from signed without one, and a token with no expiry stays valid forever.
+- **Failures are real status codes**, with a JSON body. An API that answers every authentication
+  failure with HTTP 200 and `{status:false}` can no longer use 401 for what it means — and now also
+  needs 403 to mean "signed in, but not allowed", which it could not express at all.
 
 ### 3.6 The data model
 
-Nine collections, all prefixed `gi_`. Mongoose 9, `autoIndex` on by default (right for a
-single-tenant self-hosted install; `MONGO_DISABLE_AUTO_INDEX=true` opts out).
+Sixteen collections, all prefixed `gi_`. Mongoose 9, `autoIndex` on by default (right for a
+single-tenant self-hosted install; `MONGO_DISABLE_AUTO_INDEX=true` opts out — except for the six auth
+collections below whose indexes carry gates or TTLs, which boot builds explicitly either way, §3.1).
 
 | collection | holds | unique key |
 |---|---|---|
@@ -446,12 +703,30 @@ single-tenant self-hosted install; `MONGO_DISABLE_AUTO_INDEX=true` opts out).
 | `gi_listing_geo_dailies` | daily country split | `(partner_app_id, date, country)` |
 | `gi_listing_install_attributions` | one row per install, with its acquisition surface | `(partner_app_id, shop, installed_at)` |
 | `gi_sync_jobs` | the job queue and its history | — |
-| `gi_admin_users` | the single operator | `email` |
+| `gi_system_states` | one document, `_id: 'install'`: the setup lock (`setup_completed_at`), the owner pointer (`owner_user_id`), the setup link that completed it | `_id` |
+| `gi_users` | accounts: email, name, bcrypt `password_hash` (`select: false`), stored `role_key` + `custom_role_id`, status, `session_epoch`, the reset throttle log | `email` |
+| `gi_roles` | custom roles only (built-ins are code): name, description, permission keys | `name_norm` |
+| `gi_invites` | invitations and their fate — role, inviter, expiry, accepted / revoked and why, send log | `token_hash`; `pending_email` (**partial** — only while outstanding) |
+| `gi_auth_tokens` | setup-confirmation and password-reset links, as hashes; the setup **claim** (`select: false`) until the owner row exists | `token_hash`; TTL: 7 days after `expires_at` |
+| `gi_auth_sessions` | one row per sign-in: user, expiry, revocation and why, epoch, ip, user agent | `_id` (the JWT's `sid`); TTL at `expires_at` |
+| `gi_audit_events` | the security activity log | — ; TTL at `expires_at`, set only on anonymous rows (180 days) |
+| `gi_admin_users` | accounts from the single-operator build, stamped `legacy_at` at boot. Never read by sign-in; read only as the legacy setup allow-list, by the CLI's `status`, and counted by the health snapshot | `email` |
 
-Every unique index is **explicitly named** (`uniq_partner_event_id`, `uniq_app_date`, …). That is not
-cosmetic: mongoose's "Duplicate schema index" warning fires only when two specs are unnamed and
-resolve to the same default name, and it masks an `IndexOptionsConflict` that leaves the second index
-**silently unbuilt** — so a uniqueness guarantee that is load-bearing for idempotency never exists.
+Every unique index is **explicitly named** (`uniq_partner_event_id`, `uniq_app_date`,
+`uniq_user_email`, …). That is not cosmetic: mongoose's "Duplicate schema index" warning fires only
+when two specs are unnamed and resolve to the same default name, and it masks an
+`IndexOptionsConflict` that leaves the second index **silently unbuilt** — so a uniqueness guarantee
+that is load-bearing for idempotency never exists.
+
+⚠️ **`strictQuery: true` (set in `core/db.ts`) silently strips undeclared filter paths** — a filter
+on a field the schema does not declare becomes `{}` and matches the first document. So every field
+the auth code filters or `$set`s on is declared — `test/authQueryPaths.test.js` records every auth
+repository's filters and updates and fails on an undeclared path — and every token and session
+lookup **also compares the matched document's key field in code** after the query. The auth writes use single-document
+compare-and-set (`findOneAndUpdate` with the expected state in the filter,
+`returnDocument: 'after'`) as their only lock, and a duplicate-key error is read by its
+`keyPattern` — `_id` means already done, `email` means already a member, `pending_email` means an
+invitation is outstanding, `name_norm` means the role name is taken.
 
 `gi_partner_apps` is the interesting one: alongside the app's identity it carries the measurements a
 sync records **about its own completeness** — `earliest_event_at`, `earliest_transaction_at`,
@@ -807,12 +1082,13 @@ apart reads a window expiry as a cancellation the merchant made.
 
 #### ⚠️ A module must not import another module's BARREL when that closes a cycle
 
-The default is still: **siblings by deep path, other modules by their barrel.** Eighteen cross-module
-barrel imports exist and are correct — count them with:
+The default is still: **siblings by deep path, other modules by their barrel.** Twenty-five
+cross-module barrel imports exist and are correct — eighteen among the analytics modules, and seven
+from `auth` services into `mail` — count them with:
 
 ```bash
-grep -rhcE "^import \w+ = require\('\.\./\.\./(auth|partner|revenue|bigquery|sync|store|conversion|shared)'\);" \
-  backend/src --include=*.ts | awk '{t+=$1} END{print t}'   # 18
+grep -rhcE "^import \w+ = require\('\.\./\.\./(auth|mail|partner|revenue|bigquery|sync|store|conversion|shared)'\);" \
+  backend/src --include=*.ts | awk '{t+=$1} END{print t}'   # 25
 ```
 
 But a barrel **eagerly loads the whole module**, and in four places that closes an import cycle
@@ -850,16 +1126,18 @@ chokepoint and a constants file.
 
 **Before adding a cross-module import, check the direction.** `modules/store` and `modules/conversion`
 may reach `modules/revenue` and `modules/bigquery` through their barrels; `modules/sync` may reach
-`modules/bigquery`. The reverse — `revenue` or `partner` reaching `conversion` or `store` — must be a
-deep path to a leaf.
+`modules/bigquery`; `modules/auth` may reach `modules/mail`. The reverse — `revenue` or `partner`
+reaching `conversion` or `store`, or `mail` reaching `auth` — must be a deep path to a leaf, and
+`mail` has no reason to reach `auth` at all. `modules/sync` imports nothing from `auth`: the one value
+they share lives in `src/constants/authVocab.constants.ts`, a leaf with no imports.
 
-The graph is acyclic today: of 247 TypeScript files, **182 carry a value-import edge and there are
-zero strongly-connected components**, measured by building the `import x = require('…')` graph over
+The graph is acyclic today: of 313 TypeScript files, **198 carry a value-import edge and there are
+zero strongly-connected components**, measured by building the relative `import`/`require` graph over
 `backend/src` (type-only imports excluded — they are erased and cannot cycle at run time) and running
 Tarjan's algorithm over it. There is no npm script for this, but CI is not blind to it: the
 `Import cycles` step in `.github/workflows/ci.yml` loads every `src/modules/*/index.ts` in a fresh
 `node --trace-warnings` process and fails the job on a `circular dependency` warning or a module that
-will not load at all (7 entry points, exit 0 as of this writing). That is a RUN-TIME probe of the
+will not load at all (8 entry points, `mail` included, exit 0 as of this writing). That is a RUN-TIME probe of the
 barrels, not the static whole-graph analysis above — a cycle reachable only through a deep path that
 no barrel pulls in would still slip past it. If you want the stronger guard, Tarjan over the
 `import x = require('…')` graph is the shape it needs.
@@ -872,9 +1150,9 @@ the cross-module import disappears entirely.
 
 ## 4. Frontend
 
-Next.js 14 (pages router), React 18, Shopify Polaris 12, Recharts 3, axios. No state library — page
-state is local, and two contexts carry what is genuinely shared (`growthIntelContext` = the selected
-app; `loaderContext`).
+Next.js 15 (pages router), React 18, Shopify Polaris 12, Recharts 3, axios. No state library — page
+state is local, and three contexts carry what is genuinely shared (`sessionContext` = who is signed in
+and what their role allows, §4.3a; `growthIntelContext` = the selected app; `loaderContext`).
 
 ### 4.1 One origin
 
@@ -916,10 +1194,58 @@ client that reads the token in its constructor captures whatever was there at im
 login does not reach it until a full page reload — and a logout keeps being honoured. Reading per
 request makes both immediate.
 
+**401 and 403 mean different things, and the interceptor treats them differently.** A `401` from any
+path outside `/api/auth/*` means the session is over: the token is cleared and the page redirects to
+`/login` once, with `next` set to where you were (never carrying a URL fragment, which on a token page
+is a credential). A `401` from `/api/auth/*` never clears or redirects — from sign-in it means a wrong
+password, and the token flows never answer `401` by contract. A `403` is passed to the calling service
+untouched, and listeners registered with `onForbiddenResponse` are told; the session context uses that
+to re-read the account (§4.3a), because a `403` usually means the role just changed.
+
+### 4.3a Who is signed in, and what they may open
+
+**Public pages.** `utils/publicRoutes.js` lists them once — `/login`, the error pages, `/setup`,
+`/setup/verify`, `/accept-invite`, `/forgot-password`, `/reset-password` — and `_app.js`,
+`apiClient.js` and `login.js` all read that list. They render without a session and without the side
+nav. The token pages read `#token=…` only once `router.isReady` (Next's own startup would otherwise
+write the fragment back into the address bar), strip it with `history.replaceState` — from Next's
+history entry too, so Back then Forward cannot restore it — inspect the link automatically, and spend
+it only on a button press. `_document.js` sets `referrer: no-referrer` as a meta tag, because the meta
+overrides the header.
+
+**`contexts/sessionContext.js`** loads `GET /api/account` once the gate allows and exposes
+`{ state, user, role, permissions, can(key), canAny(keys), refresh, logout, … }`. `state` is
+`loading | ready | error`, and on any non-public page `_app.js` **holds rendering until `ready`**, so
+nothing flashes a button the role cannot use. `error` renders a full page, *Could not load your
+account*, with Retry — it is never read as "no permissions" and never signs anyone out, because a
+`503` while the database restarts is not a reason to throw away a good token. The account is re-read
+when the tab becomes visible, when another tab signs in or out (the `storage` event), and on a `403`
+(at most once per 30 s). `logout` posts `POST /api/account/logout` best-effort, clears the token and
+the remembered partner app, and does a full `window.location.replace('/login')` so no in-memory state
+survives into the next person's session.
+
+**Pages are gated by permission, default-deny.** `utils/permissions.js` maps every page path to the
+keys that open it (`PAGE_PERMISSIONS` — the page opens when the role holds *any* of them). A page
+missing from the map is refused for everyone, the owner included: loud on purpose, because the other
+direction — a new page open to all until someone remembers to list it — fails silently. Once the
+session is ready, a page the role cannot open renders a full-page *Restricted* notice naming the role,
+**without mounting the page**, so none of its requests fire. The nav is filtered by the same map, `/`
+forwards to `landingRouteFor(permissions)` (never null: `/account` needs nothing), and controls the
+role cannot use are disabled with a reason (sync triggers) or hidden (app registration).
+
+⚠️ `utils/permissions.js` carries a **copy** of the backend's permission keys, owner-only keys and
+audit-action names — a cross-repository string contract. `backend/test/permissionParity.test.js` loads it and fails when
+the two drift.
+
+None of this is a security boundary. The backend authorises every request on its own (§3.4, §3.5); the
+frontend only decides what to offer.
+
 ### 4.4 Pages, and what is behind them
 
-Ten screens: eight in the **Performance** nav section — the Overview first — and two in **Setup**.
-All of them have a working backend.
+Ten dashboard screens: eight in the **Performance** nav section — the Overview first — and two in
+**Setup**. Then **Users & roles** under **Administration**, **Account** in the top-bar user menu, and
+the six public pages of §4.3a. All of them have a working backend. The side nav shows only what the
+signed-in role can open.
 
 ⚠️ **`/revenue` is one route carrying three views**, selected by `?view=` and listed separately in
 the table below because they are three different endpoints and three different windows. See §4.4c.
@@ -938,6 +1264,9 @@ the table below because they are three different endpoints and three different w
 | Revenue → *Churn* tab | `/revenue?view=churn` | `getRevenueChurn` | `/api/conversion/revenue-churn` |
 | **Partner Apps** *(Setup)* | `/apps` | `getKpi`, list/upsert/update/deactivate | `/api/partner-apps` and its four sub-routes |
 | **Sync** *(Setup)* | `/sync` | `getHealth`, `getCoverage`, `listJobs`, `getJob`, triggers | `/api/sync/*`, `/api/meta/coverage` |
+| **Users & roles** *(Administration)* | `/settings/users` — Members · Invitations · Roles · Activity, as `?view=` | `userAdminService` | `/api/users/*`, `/api/invites/*`, `/api/roles/*`, `/api/audit-events` |
+| **Account** *(user menu)* | `/account` | `accountService` | `/api/account/*` |
+| Sign-in and the public pages | `/login`, `/setup`, `/setup/verify`, `/accept-invite`, `/forgot-password`, `/reset-password` | `authService` | `/api/auth/*` |
 
 ⚠️ **The store drawer is served at `/api/stores/detail`, not `/api/subscriptions/detail`**, and both
 list pages open the same one. The drawer's commonest subject is a store that never subscribed, so
@@ -975,8 +1304,8 @@ will be rendered.
 
 This is the load-bearing piece of the frontend and the newest, so it is documented here in full.
 
-**The problem.** Every growth-intel service can answer in five materially different ways, and **four
-of them are empty**. A page that tests `if (resp && resp.status && resp.data)` collapses all four
+**The problem.** Every growth-intel service can answer in six materially different ways, and **five
+of them are not a measured answer**. A page that tests `if (resp && resp.status && resp.data)` collapses all four
 into one and then draws its own empty state over the top. That is how this dashboard came to publish,
 on a page whose endpoint was never called:
 
@@ -995,6 +1324,7 @@ every state except `READY`**.
 | state | means | the sentence carries |
 |---|---|---|
 | `NOT_IMPLEMENTED` | No route serves this. | the endpoint that *would*. No sync will ever change it. |
+| `FORBIDDEN` | The signed-in role lacks the permission (HTTP 403, `error.code: 'FORBIDDEN'`). | the permission's label: *"Restricted — your role does not include View merchants"*. Says nothing about the data, so it never draws an empty state. |
 | `NOT_CONNECTED` | An upstream is unconfigured. | **the missing environment variable.** The single most valuable sentence the API emits, and the easiest to discard. |
 | `NEVER_SYNCED` | Configured; nothing has run. | why. Figures are `null`, never `0`. |
 | `READY` | A real answer. | — an empty array here is a *measured* empty, the only one worth drawing. |
@@ -1012,6 +1342,9 @@ a banner that flashes on every navigation trains the operator to ignore banners.
 2. **`not_implemented` before `status`.** That envelope sets `status: false` *on purpose*, so
    pre-existing `if (!resp.status)` guards keep working — reading `status` first therefore misfiles
    every stub as a connection failure, the exact confusion the decoder exists to end.
+   **`FORBIDDEN` goes before the refusal/failure heuristic below for the same reason**: a 403 is
+   `status: false` with a message, which that heuristic would file as a failure — sending the reader
+   to a server log over a role only an owner or admin can change.
 3. **`resp.data` is read with no `|| {}` default.** An earlier draft wrote `const data = resp.data || {}`,
    and that one expression reintroduces the bug inside the decoder built to prevent it: `status: true`
    with `data: null` becomes a truthy empty object, decodes as `READY`, and every page renders charts
@@ -1170,27 +1503,44 @@ and do not draw a chart over a figure the backend refused to publish.
 
 ## 5. What is asserted, and what is not
 
-`npm test` in `backend/` — plain `node:test`, no framework, no database required. **519 tests across
-23 suite files, all passing.** Take the count rather than trusting this line — it moves with every
-wave of work:
+`npm test` in `backend/` — plain `node:test`, no framework, no database required. **745 tests across
+39 suite files, all passing**, when this was last measured. Take the count rather than trusting this
+line — it moves with every wave of work:
 
 ```bash
-cd backend && npm test              # ℹ tests 519 · pass 519 · fail 0
-ls backend/test/*.test.js | wc -l   # 23
+cd backend && npm test              # ℹ tests 745 · pass 745 · fail 0
+ls backend/test/*.test.js | wc -l   # 39
 ```
 
-The three structural suites are the ones that guard the shape of the system rather than a figure:
+The structural suites are the ones that guard the shape of the system rather than a figure:
 
 | suite | asserts |
 |---|---|
-| `routeGuard.test.js` | **every `/api/*` route is behind `verifyAdmin`**, and the only unauthenticated endpoints are the two in `ALLOWLIST` |
+| `routeGuard.test.js` | **every `/api/*` route is behind `authenticate`**, and the only unauthenticated endpoints are the ten in `ALLOWLIST` |
+| `permissionMap.test.js` | every guarded route declares **exactly one** policy, first among its route-level middleware, and it is the key a pinned table names for that route; the guard chain is exactly `authenticate`; every catalogue key is used; mutating verbs never carry a `:read` key except `POST /api/revenue/shop-plans`; behaviourally, a principal without the key gets `403` and one with it does not; the built-in roles nest |
+| `permissionParity.test.js` | the frontend's copy of the permission keys, owner-only keys, page permissions and audit-action labels equals the backend's |
 | `exportSurface.test.js` | every barrel enumerates its keys (no spread), and **every enumerated key resolves to something** |
+| `lintRules.test.js` | the two lint guards actually fire — the request-address reads (§3.5) and the model-layer imports (§3.3) — by running ESLint over in-memory snippets |
 | `confidence.test.js` | unknown never becomes zero, and a measured zero never becomes unknown |
 
-The rest are per-endpoint, per-fold and per-middleware: `conversionAnalysis`, `countryRollup`,
-`customFunnel`, `installCohort`, `installCohortRepository`, `logoChurn`, `partnerAppAdmin`, `partnerAppKpi`, `revenueChurn`, `revenueMovement`, `revenueOverview`,
-`securityHeaders`, `securityRateLimit`, `seedDemo`, `storeDetail`, `storeRoster`, `storeUnconfigured`,
-`subscriptionList`, `syncJobs`, `trialOutcomes`.
+The auth and mail suites drive the rules and the races without a database:
+
+| suite | covers |
+|---|---|
+| `authHelpers.test.js` | the pure rules: password policy, token shape and hash, `resolvePrincipal`, the management rule, custom-role validation, invitation state |
+| `authServices.test.js` | the services over in-memory repositories whose compare-and-set behaves like Mongo's: two setups racing for the lock, an accept racing a revoke, a reset landing between a sign-in's read and its session insert, permitted and non-permitted setup requests making the same calls before the answer |
+| `authQueryPaths.test.js` | every auth repository filter and update names only fields the schema declares — under `strictQuery` an undeclared path is silently dropped, which would turn a compare-and-set into an unconditional write |
+| `authFlowRateLimit.test.js` | the three public-flow limiters' keys, charging and isolation from each other and from sign-in |
+| `mail.test.js` | fixed subjects, escaped bodies, the cap classes, never throwing, no link or token in a log |
+| `configValidate.test.js` | the `APP_PUBLIC_URL`, SMTP and setup-owner rules, the warnings and the upgrade banner |
+| `authAdminCli.test.js` | the recovery CLI, run as a child process: it refuses a password argument and exits non-zero on a bad command line having read nothing |
+
+The rest are per-endpoint, per-fold and per-middleware: `cancelTrap`, `cancelTrapWire`,
+`conversionAnalysis`, `countryRollup`, `customFunnel`, `errorEnvelope`, `installAttributionSurface`,
+`installCohort`, `installCohortRepository`, `listingRates`, `logoChurn`, `partnerAppAdmin`,
+`partnerAppKpi`, `revenueChurn`, `revenueMovement`, `revenueOverview`, `securityHeaders`,
+`securityRateLimit`, `seedDemo`, `storeDetail`, `storeRoster`, `storeUnconfigured`, `subscriptionList`,
+`surfacePlacement`, `syncJobs`, `trialOutcomes`.
 
 `storeUnconfigured.test.js` exists because `src/config` snapshots `process.env` at first require —
 one process cannot exercise both listing-tier states, so the BigQuery-off case needs its own file.
@@ -1210,26 +1560,41 @@ registry comes in through an untyped `require`. They would have failed as `x.fin
 on whichever request touched them first.
 
 **What is *not* covered.** There is no integration test, no database fixture, no frontend test, and
-no end-to-end run. Treat `npm run typecheck` and `npm run lint` as part of the suite: the lint config
-carries the layer guard, and it is the only thing enforcing it. Both are clean —
+no end-to-end run — which now includes the setup, invitation and reset flows: the suites above prove
+the rules and the interleavings against fakes, and nothing in the repository runs those flows against
+a real Mongo or a real mail server. Treat `npm run typecheck` and `npm run lint` as part of the suite:
+the lint config carries the layer guard and the request-address guard, and it is the only thing
+enforcing either in code that has no test. Both are clean —
 `tsc --noEmit` reports nothing and `eslint .` reports **0 errors** (12 `max-len` warnings, every
 one of them a long function signature — not a comment).
 
 ⚠️ **No *test* covers import cycles**, but CI does check for them: the `Import cycles` step in
-`.github/workflows/ci.yml` loads all 7 module barrels in fresh processes with `--trace-warnings` and
-fails on a `circular dependency` warning. That catches the common case — a cross-module barrel import
-that closes a loop, which passes typecheck *and* lint and fails only at run time. It does not catch a
-cycle that no barrel reaches. The graph is clean today: 182 files with a value-import edge across
-247, zero strongly-connected components.
+`.github/workflows/ci.yml` loads every `src/modules/*/index.ts` — eight barrels today, `mail`
+included — in fresh processes with an empty environment and `--trace-warnings`, and fails on a
+`circular dependency` warning. That catches the common case — a cross-module barrel import that
+closes a loop, which passes typecheck *and* lint and fails only at run time. It does not catch a
+cycle that no barrel reaches. The graph is clean today: 198 files with a value-import edge across 313,
+zero strongly-connected components (a walk of relative `import`/`require` edges, `import type`
+excluded).
 
 ---
 
 ## 6. Extending it
 
 **Add an endpoint.** Service method → controller handler (`_verbDomainResource`, `export =`) → one
-line in the domain's `.routes.ts` → import + one `guardedApiRouter.use(...)` line if the area is new.
-The route-guard test passes automatically; if it fails you have mounted on the wrong parent, which is
-the whole point.
+line in the domain's `.routes.ts`, **with its policy as the first route-level middleware** —
+`router.get('/x', requirePermission(PERMISSIONS.MERCHANTS_READ), _handler)`, or `requireSelf()` —
+→ import + one `guardedApiRouter.use(...)` line if the area is new. Then add the route and its key to
+the pinned table in `test/permissionMap.test.js`. The route-guard test passes automatically; if it
+fails you have mounted on the wrong parent, which is the whole point. Choose the key by what the
+response **discloses**: anything that names a store is `merchants:read`, money without store names is
+`financials:read`, counts and rates are `analytics:read`.
+
+**Add a permission.** `modules/auth/constants/permissions.constants.ts` (key, label, group, a
+description of what it discloses, its prerequisites) → the built-in roles that should hold it in
+`roles.constants.ts` → the same key in `frontend/utils/permissions.js` and any page it opens →
+the routes that demand it. `permissionParity.test.js` fails until the two copies agree. A key renamed
+later is silently dropped from every custom role that held it, so treat the strings as permanent.
 
 **Add a module.** `modules/<name>/` with only the role folders it needs, plus `index.ts` enumerating
 every published key. Import siblings by deep path, other modules by their barrel.
@@ -1244,15 +1609,16 @@ source, and get a row in `FIDELITY.md` — including what would make it wrong. A
 table is not published.
 
 **Add a setting.** `config/index.ts` only, in the matching section. If the application cannot produce
-a correct number without it, add it to `TIER_1_KEYS` in `config/validate.ts` with an example line.
+a correct number — or cannot let anyone in — without it, add it to `TIER_1_KEYS` in
+`config/validate.ts` with an example line, and give it a row in `DEPLOYMENT.md` §3.
 
 ---
 
 ## 7. Known gaps
 
 Recorded because a gap you have written down is a different thing from one you have not noticed. This
-list is re-verified against the code, not carried forward. Four entries that were here previously are
-now **closed** and are listed at the bottom so a returning reader does not go looking for them.
+list is re-verified against the code, not carried forward. Entries that were here previously and are
+now **closed** are listed at the bottom so a returning reader does not go looking for them.
 
 ### Open
 
@@ -1270,7 +1636,7 @@ now **closed** and are listed at the bottom so a returning reader does not go lo
   service reads it. Setting it does not currently cause anything to be published as unknown. Until a
   windowed endpoint uses it, the honest floor is the measured `coverage.earliest_transaction_at`.
 - **No integration test, no database fixture, no frontend test, no end-to-end run** (§5).
-- **Import-cycle detection is partial** (§3.13). CI loads the 7 module barrels and fails on a
+- **Import-cycle detection is partial** (§3.13). CI loads the 8 module barrels and fails on a
   `circular dependency` warning, which is the common case; a cycle no barrel reaches is still silent
   at typecheck and lint alike. There is no whole-graph static check.
 - **Single partner app in practice.** The schema and every query are keyed by `partner_app_id` and
@@ -1279,14 +1645,46 @@ now **closed** and are listed at the bottom so a returning reader does not go lo
   decision and asks for sign-off before one is added, because a row that expires takes the only
   evidence that a sync happened with it. It grows by roughly one row per sync (~365/year plus manual
   runs). Small, but monotonic; archive rather than expire.
-- **`TRUST_PROXY` must be set for the login rate limit to mean anything.** It defaults to Express's
-  `false`, which is the safe direction — but behind the dashboard's own proxy that makes every
-  caller share one bucket. It is a required step for any real deployment and nothing enforces it.
+- **The address-keyed rate limits are per-deployment unless a real proxy is in front.** Sign-in,
+  forgot-password and the setup request count against `req.ip`. Behind the bundled stack alone the
+  dashboard forwards a caller-supplied `X-Forwarded-For` unchanged, so the correct setting is to
+  leave `TRUST_PROXY` unset — and then every caller shares one budget per limiter. That stops brute
+  force, and a returning user signs in on their browser's device budget whatever the flood, but one
+  caller can spend the shared budget and then take every trickle admission by polling, so a first
+  sign-in from a new browser can be kept waiting for as long as they keep it up. Per-address limits
+  need the nginx recipe in `DEPLOYMENT.md` with `TRUST_PROXY=uniquelocal`.
+  The emailed-link limiter is keyed on the token and is not affected.
+- **The token-flow limiter's deployment-wide budget can be spent by anyone.** An anonymous caller
+  posting random well-formed tokens is charged for each dead link, and once the global budget (5 ×
+  `AUTH_PUBLIC_FLOW_RATE_LIMIT_MAX`) is spent, setup completion, invitation acceptance and password
+  reset admit one request per 30 s for everybody until the window rolls.
+- **Rate limits and mail caps live in process memory.** A restart clears them, and a second replica
+  would have its own. `AUTH_PUBLIC_FLOW_RATE_LIMIT_MAX=0` switches the three public-flow limiters off
+  (boot warns while it does).
+- **First-run setup is first-come unless `SETUP_OWNER_EMAIL` is set** (or legacy operator rows
+  restrict it). Boot warns at every start while it is open, and an empty database reopens it.
+- **No email change, no user deletion, no multi-factor authentication, no single sign-on.** A leaver
+  is disabled; a new address is a new invitation; ownership moves only through the CLI.
+- **The dashboard sends no script Content-Security-Policy.** `next.config.js` sets only
+  `frame-ancestors 'none'`; a nonce-based policy is not built. The API's own responses carry a strict
+  policy (helmet).
+- **Change-password does not throttle wrong current-password guesses** beyond the bcrypt cost. It
+  needs a signed-in session to reach.
+- **The setup request's per-address caps are check-then-insert**, not atomic, so concurrent requests
+  can exceed three an hour for one address. The global cap of ten live links still bounds it.
+- **The "password changed" notice is sent after the response** and is not retried: a crash in between
+  loses it.
+- **The Users and Roles lists read every user and outstanding invitation per request.** Fine for a
+  team; not built for thousands of accounts.
 - **`gi_store_enrichments` is declared in types and does not exist** (§3.12). Every operator-profile
   key on the store record is permanently `null` in this build.
 
 ### Closed since this section was written
 
+- ~~One operator account from the environment; no password reset, no second user, no roles, no
+  audit trail.~~ **Closed.** First-run setup, invitations, a fixed permission catalogue with
+  built-in and custom roles checked per route, forgot/reset/change password, a security activity log
+  and a recovery CLI (§3.5). `ADMIN_*` are ignored.
 - ~~`.env.example` names Partner variables the code does not read.~~ **Fixed.** Both example files
   now use the `SHOPIFY_PARTNER_*` spellings; the five old names appear nowhere in the repository.
   `DEPLOYMENT.md` §3's warning box has been rewritten to say so.
@@ -1294,7 +1692,7 @@ now **closed** and are listed at the bottom so a returning reader does not go lo
   three daily rollups, per-install attribution, two trigger endpoints, two crons and the read side —
   and `DEPLOYMENT.md` §3 Tier 2 now documents it, including the four cost controls.
 - ~~Most dashboard endpoints are not built.~~ **Closed.** Every screen has a working backend
-  across 38 routes (§3.4, §4.4). The only remaining `notImplemented` call site is the deliberate
+  across the 66 routes (§3.4, §4.4). The only remaining `notImplemented` call site is the deliberate
   refusal of three job types with no server handler.
 - ~~Pages collapse the backend's empty states at the render boundary.~~ **Closed structurally**, by
   the shared decoder in §4.4a rather than by review discipline — see the postscript to §4.5.

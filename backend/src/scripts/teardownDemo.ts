@@ -13,9 +13,10 @@
  *  does not carry the demo marker it was not written here, and deleting it would
  *  take a real app's whole history with it. See `services/demoSeed.service`.
  *
- *  The operator account is NOT touched. It is seeded by the application itself
- *  at boot (`seedAdminIfMissing`, from ADMIN_EMAIL / ADMIN_PASSWORD) and is not
- *  demo data — removing it would lock the operator out of their own deployment.
+ *  Sign-in data is NOT touched: users, roles, invitations, sessions, the install
+ *  state and the audit log. None of it is demo data — people create it through
+ *  first-run setup and invitations — and removing it would lock them out of
+ *  their own deployment.
  *
  *  ── Exit codes ──────────────────────────────────────────────────────────────
  *      0  removed, or there was nothing to remove

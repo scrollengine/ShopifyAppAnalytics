@@ -1,5 +1,6 @@
 import { Banner, BlockStack, Text } from '@shopify/polaris';
 
+import { permissionLabel } from '../../utils/permissions';
 import { cardShell } from './cardShell';
 import { DATA_STATE } from './dataState';
 
@@ -24,6 +25,13 @@ import { DATA_STATE } from './dataState';
  *                       operator to ignore banners.
  *      READY            children.
  *      NOT_IMPLEMENTED  warning banner naming the endpoint that would serve it.
+ *      FORBIDDEN        info banner: "Restricted — your role does not include
+ *                       <permission>". Info, not critical: nothing is broken,
+ *                       and nothing the reader can fix. Never the empty state,
+ *                       never the chart — the data behind it may be full, and a
+ *                       blank section would read as "there is none". (The
+ *                       session re-reads the role on its own: the axios client
+ *                       reports every 403 to it, so this component need not.)
  *      NOT_CONNECTED    warning banner carrying the server's own sentence,
  *                       which names the missing environment variable.
  *      NEVER_SYNCED     info banner — nothing is broken, nothing has run yet.
@@ -51,6 +59,7 @@ import { DATA_STATE } from './dataState';
  *  reads as a fault the operator must chase. */
 const TONE = {
     [DATA_STATE.NOT_IMPLEMENTED]: 'warning',
+    [DATA_STATE.FORBIDDEN]: 'info',
     [DATA_STATE.NOT_CONNECTED]: 'warning',
     [DATA_STATE.NEVER_SYNCED]: 'info',
     [DATA_STATE.ERROR]: 'critical'
@@ -61,6 +70,7 @@ const TONE = {
  *  not built" is a fact. */
 const HEADING = {
     [DATA_STATE.NOT_IMPLEMENTED]: 'Not built yet',
+    [DATA_STATE.FORBIDDEN]: 'Restricted',
     [DATA_STATE.NOT_CONNECTED]: 'Data source not connected',
     [DATA_STATE.NEVER_SYNCED]: 'Nothing synced yet',
     [DATA_STATE.ERROR]: 'This could not be loaded'
@@ -88,7 +98,28 @@ const _guidance = (state, endpoint) => {
     if (state === DATA_STATE.NEVER_SYNCED) {
         return 'This is not a reading of zero — it is the absence of a reading. Run a sync from the Sync page and it will fill in.';
     }
+    if (state === DATA_STATE.FORBIDDEN) {
+        return 'Nothing is drawn in its place: this says nothing about the data, only about what your role may read. An Owner or Admin can change your role.';
+    }
     return '';
+};
+
+/**
+ * The banner heading for a state.
+ *
+ * FORBIDDEN names the permission in the heading itself, because it is the whole of the message: the
+ * reader needs to know WHICH access is missing, and a heading of just "Restricted" leaves them to
+ * find that in the small print.
+ *
+ * @param {String} state - One of DATA_STATE.
+ * @param {String|null} permission - The key a FORBIDDEN answer named.
+ * @returns {String}
+ */
+const _heading = (state, permission) => {
+    if (state === DATA_STATE.FORBIDDEN) {
+        return `${HEADING[DATA_STATE.FORBIDDEN]} — your role does not include ${permissionLabel(permission)}`;
+    }
+    return HEADING[state] || HEADING[DATA_STATE.ERROR];
 };
 
 /**
@@ -140,16 +171,24 @@ export const DataStateSection = ({
 
     const wrap = cardShell(bare, { cardPadding, padWhenBare });
     const guidance = _guidance(current, state && state.endpoint);
+    const permission = (state && state.permission) || null;
+
+    // For FORBIDDEN the heading already names the permission, from the server's own structured field.
+    // The server's sentence is shown only when it named none — then it is the only detail there is.
+    let reasonText = (state && state.reason) || '';
+    if (current === DATA_STATE.FORBIDDEN && permission) {
+        reasonText = '';
+    }
 
     return wrap(
         <BlockStack gap="300">
             {title ? <Text as="h3" variant="headingMd">{title}</Text> : null}
-            <Banner tone={TONE[current] || 'critical'} title={HEADING[current] || HEADING[DATA_STATE.ERROR]}>
+            <Banner tone={TONE[current] || 'critical'} title={_heading(current, permission)}>
                 <BlockStack gap="200">
                     {/* The server's own sentence, verbatim. It is the half that names the missing
                         environment variable or the missing route, and paraphrasing it here would
                         cost the operator the one string they can act on. */}
-                    {state && state.reason ? <Text as="p" variant="bodySm">{state.reason}</Text> : null}
+                    {reasonText ? <Text as="p" variant="bodySm">{reasonText}</Text> : null}
                     {guidance ? <Text as="p" variant="bodySm" tone="subdued">{guidance}</Text> : null}
                 </BlockStack>
             </Banner>
